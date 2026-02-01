@@ -568,6 +568,10 @@ RwBool RwEngineOpen(RwEngineOpenParams *initParams) {
 	static EngineOpenParams openParams;
 #ifdef RW_D3D9
 	openParams.window = (HWND)initParams->displayID;
+	openParams.d3d9 = initParams->d3d9;
+	openParams.device = initParams->device;
+	openParams.present = (D3DPRESENT_PARAMETERS*)initParams->present;
+	openParams.externalDevice = initParams->externalDevice;
 #else
 	openParams = *(EngineOpenParams*)initParams->displayID;
 #endif

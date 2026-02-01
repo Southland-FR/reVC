@@ -5,6 +5,25 @@
 #include "CdStream.h"
 #include "MemoryMgr.h"
 
+static FILE *gCdLog = nil;
+static void
+CdLog(const char *msg)
+{
+	if(gCdLog == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gCdLog = fopen(logPath, "a");
+	}
+	if(gCdLog == nil)
+		return;
+	fprintf(gCdLog, "CdStream: %s\n", msg);
+	fflush(gCdLog);
+}
 struct CdReadInfo
 {
 	uint32 nSectorOffset;
@@ -479,9 +498,13 @@ CdStreamAddImage(char const *path)
 {
 	ASSERT(path != nil);
 	ASSERT(gNumImages < MAX_CDIMAGES);
-	
+
+	{
+		char buf[256];
+		sprintf(buf, "AddImage begin path=%s", path);
+		CdLog(buf);
+	}
 	SetLastError(0);
-	
 	gImgFiles[gNumImages] = CreateFile(path,
 	                                   GENERIC_READ,
 	                                   FILE_SHARE_READ,
@@ -489,15 +512,25 @@ CdStreamAddImage(char const *path)
 	                                   OPEN_EXISTING,
 	                                   _gdwCdStreamFlags | FILE_FLAG_RANDOM_ACCESS | FILE_ATTRIBUTE_READONLY,
 	                                   nil);
-	
+
 	ASSERT( gImgFiles[gNumImages] != nil );
-	if ( gImgFiles[gNumImages] == NULL )
+	if ( gImgFiles[gNumImages] == NULL ){
+		DWORD err = GetLastError();
+		char buf[256];
+		sprintf(buf, "AddImage FAIL path=%s err=%lu", path, (unsigned long)err);
+		CdLog(buf);
 		return false;
+	}
 	
 	strcpy(gCdImageNames[gNumImages], path);
-	
+
+	{
+		char buf[256];
+		sprintf(buf, "AddImage ok index=%d", gNumImages);
+		CdLog(buf);
+	}
 	gNumImages++;
-	
+
 	return true;
 }
 

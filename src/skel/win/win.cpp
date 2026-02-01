@@ -29,7 +29,7 @@
 
 #define WM_GRAPHNOTIFY	WM_USER+13
 
-#ifndef USE_D3D9
+#if !defined(USE_D3D9) && !defined(REVC_DLL)
 #pragma comment( lib, "d3d8.lib" )
 #endif
 #pragma comment( lib, "ddraw.lib" )
@@ -45,6 +45,8 @@
 #include <tchar.h>
 #endif /* (defined(_MSC_VER)) */
 #include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
 #include "rwcore.h"
 #include "resource.h"
 #include "skeleton.h"
@@ -65,6 +67,64 @@ static RwBool startupDeactivate;
 
 static RwBool useDefault;
 
+static RwBool gRevcDllInitialized = FALSE;
+static RwBool gRevcExitRequested = FALSE;
+static RwBool gRevcGameInitialized = FALSE;
+static char gRevcPrevCwd[MAX_PATH];
+
+static FILE *gRevcLog = nil;
+static const char *gRevcBuildId = "revc_in_sa build " __DATE__ " " __TIME__;
+static IDirect3DDevice9 *gRevcD3DDevice = nil;
+static IDirect3D9 *gRevcD3D9 = nil;
+static HWND gRevcHwnd = nil;
+static RwBool gRevcInputInitialized = FALSE;
+static RwBool gRevcRwInitialized = FALSE;
+
+static void RevcLog(const char *fmt, ...)
+{
+	if(gRevcLog == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gRevcLog = fopen(logPath, "a");
+	}
+	if(gRevcLog == nil)
+		return;
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	fprintf(gRevcLog, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(gRevcLog, fmt, args);
+	va_end(args);
+	fprintf(gRevcLog, "\n");
+	fflush(gRevcLog);
+}
+
+static void RevcLogException(const char *tag, EXCEPTION_POINTERS *info)
+{
+	if(!info){
+		RevcLog("%s: exception (no info)", tag);
+		return;
+	}
+	RevcLog("%s: exception code=0x%08X address=%p",
+		tag,
+		(unsigned)info->ExceptionRecord->ExceptionCode,
+		info->ExceptionRecord->ExceptionAddress);
+}
+
+static int RevcSehFilter(const char *tag, EXCEPTION_POINTERS *info)
+{
+	RevcLogException(tag, info);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
 /* Class name for the MS Window's window class. */
 
 static const RwChar *AppClassName = RWSTRING("Grand theft auto 3");
@@ -78,6 +138,19 @@ static psGlobalType PsGlobal;
 #define MAKEPOINTS(l)		(*((POINTS /*FAR*/ *)&(l)))
 
 #define SAFE_RELEASE(x) { if (x) x->Release(); x = NULL; }
+
+#ifdef REVC_DLL
+extern "C" {
+	__declspec(dllexport) bool ReVC_Init(
+		HWND window,
+		IDirect3DDevice9* device,
+		IDirect3D9* d3d9,
+		const char* gameDataPath
+	);
+	__declspec(dllexport) void ReVC_Run();
+	__declspec(dllexport) void ReVC_Shutdown();
+}
+#endif
 #define JIF(x) if (FAILED(hr=(x))) \
 	{debug(TEXT("FAILED(hr=0x%x) in ") TEXT(#x) TEXT("\n"), hr); return;}
 
@@ -602,6 +675,400 @@ void _psPrintCpuInfo()
 #ifdef __MWERKS__
 #pragma dont_inline off
 #endif
+#endif
+
+#ifdef REVC_DLL
+int gRevcBackBufferWidth = 0;
+int gRevcBackBufferHeight = 0;
+extern "C" __declspec(dllexport) bool
+ReVC_Init(HWND window, IDirect3DDevice9* device, IDirect3D9* d3d9, const char* gameDataPath)
+{
+	RevcLog("ReVC_Init: begin hwnd=%p device=%p d3d9=%p gameDataPath=%s", window, device, d3d9, gameDataPath ? gameDataPath : "(null)");
+	RevcLog("ReVC_Init: %s", gRevcBuildId);
+	if(device){
+		D3DDEVICE_CREATION_PARAMETERS params;
+		HRESULT hr = device->GetCreationParameters(&params);
+		RevcLog("ReVC_Init: GetCreationParameters hr=0x%08X hFocusWindow=%p", (unsigned)hr, params.hFocusWindow);
+		IDirect3DSurface9 *bb = nil;
+		if(SUCCEEDED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))){
+			D3DSURFACE_DESC desc;
+			if(SUCCEEDED(bb->GetDesc(&desc))){
+				gRevcBackBufferWidth = (int)desc.Width;
+				gRevcBackBufferHeight = (int)desc.Height;
+			}
+			bb->Release();
+		}
+		RevcLog("ReVC_Init: backbuffer %dx%d", gRevcBackBufferWidth, gRevcBackBufferHeight);
+	}
+	if(gRevcDllInitialized)
+	{
+		RevcLog("ReVC_Init: already initialized");
+		return true;
+	}
+
+	gRevcDllInitialized = TRUE;
+	gRevcExitRequested = FALSE;
+	gRevcGameInitialized = FALSE;
+	gRevcD3DDevice = device;
+	gRevcD3D9 = d3d9;
+	gRevcHwnd = window;
+	gRevcInputInitialized = FALSE;
+	gRevcRwInitialized = FALSE;
+
+	gRevcPrevCwd[0] = '\0';
+	GetCurrentDirectoryA(MAX_PATH, gRevcPrevCwd);
+	RevcLog("ReVC_Init: prev CWD=%s", gRevcPrevCwd);
+	if(gameDataPath && gameDataPath[0] != '\0')
+		SetCurrentDirectoryA(gameDataPath);
+	RevcLog("ReVC_Init: new CWD=%s", gameDataPath ? gameDataPath : "(null)");
+	{
+		char dataPath[MAX_PATH];
+		GetCurrentDirectoryA(MAX_PATH, dataPath);
+		char datFile[MAX_PATH];
+		strcpy(datFile, dataPath);
+		strcat(datFile, "\\DATA\\GTA_VC.DAT");
+		DWORD attrs = GetFileAttributesA(datFile);
+		RevcLog("ReVC_Init: GTA_VC.DAT path=%s exists=%s", datFile, (attrs != INVALID_FILE_ATTRIBUTES) ? "yes" : "no");
+		if(attrs == INVALID_FILE_ATTRIBUTES){
+			RevcLog("ReVC_Init: missing GTA_VC.DAT, aborting");
+			goto fail;
+		}
+	}
+
+	__try {
+		RevcLog("ReVC_Init: rsINITIALIZE begin");
+		if (RsEventHandler(rsINITIALIZE, nil) == rsEVENTERROR)
+		{
+			RevcLog("ReVC_Init: rsINITIALIZE failed");
+			goto fail;
+		}
+		RevcLog("ReVC_Init: rsINITIALIZE ok");
+	} __except(RevcSehFilter("ReVC_Init: exception in rsINITIALIZE", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: rsINITIALIZE SEH");
+		goto fail;
+	}
+
+	__try {
+		RevcLog("ReVC_Init: before PSGLOBAL(window)");
+		PSGLOBAL(window) = window;
+		RevcLog("ReVC_Init: after PSGLOBAL(window)");
+		{
+			RECT rect;
+			BOOL haveRect = FALSE;
+			if (gRevcHwnd != nil)
+				haveRect = GetClientRect(gRevcHwnd, &rect);
+			if (haveRect) {
+				RevcLog("ReVC_Init: client rect %ld x %ld", rect.right, rect.bottom);
+				RsGlobal.maximumWidth = rect.right;
+				RsGlobal.maximumHeight = rect.bottom;
+				RsGlobal.width = rect.right;
+				RsGlobal.height = rect.bottom;
+				RevcLog("ReVC_Init: window size %d x %d", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+			} else {
+				RevcLog("ReVC_Init: GetClientRect failed for window %p", gRevcHwnd);
+			}
+		}
+
+		RevcLog("ReVC_Init: before RsSetExternalD3D9Device");
+		RsD3D9ExternalDeviceParams d3dParams;
+		d3dParams.d3d9 = d3d9;
+		d3dParams.device = device;
+		d3dParams.present = nil;
+		d3dParams.externalDevice = TRUE;
+		RsSetExternalD3D9Device(&d3dParams);
+		RevcLog("ReVC_Init: external device set");
+	} __except(RevcSehFilter("ReVC_Init: exception in pre-init setup", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: pre-init setup SEH");
+		goto fail;
+	}
+
+	RevcLog("ReVC_Init: input init begin");
+	ControlsManager.MakeControllerActionsBlank();
+	ControlsManager.InitDefaultControlConfiguration();
+
+	__try {
+		if (_InputInitialise() == S_OK) {
+			_InputInitialiseMouse(false);
+			_InputInitialiseJoys();
+			gRevcInputInitialized = TRUE;
+			RevcLog("ReVC_Init: input initialized");
+		}
+		ControlsManager.InitDefaultControlConfigMouse(MousePointerStateHelper.GetMouseSetUp());
+	} __except(RevcSehFilter("ReVC_Init: exception in input init", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: input init SEH");
+		goto fail;
+	}
+	RevcLog("ReVC_Init: input init end");
+
+	__try {
+		RevcLog("ReVC_Init: rsRWINITIALIZE begin");
+		if (RsEventHandler(rsRWINITIALIZE, PSGLOBAL(window)) == rsEVENTERROR)
+		{
+			RevcLog("ReVC_Init: rsRWINITIALIZE failed");
+			goto fail;
+		}
+		gRevcRwInitialized = TRUE;
+		RevcLog("ReVC_Init: rsRWINITIALIZE ok");
+	} __except(RevcSehFilter("ReVC_Init: exception in rsRWINITIALIZE", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: rsRWINITIALIZE SEH");
+		goto fail;
+	}
+
+	__try {
+		RevcLog("ReVC_Init: settings load begin");
+		CFileMgr::SetDirMyDocuments();
+		int32 gta3set = CFileMgr::OpenFile("gta_vc.set", "r");
+		if (gta3set)
+		{
+			ControlsManager.LoadSettings(gta3set);
+			CFileMgr::CloseFile(gta3set);
+		}
+		CFileMgr::SetDir("");
+		FrontEndMenuManager.LoadSettings();
+		RevcLog("ReVC_Init: settings loaded");
+	} __except(RevcSehFilter("ReVC_Init: exception in settings load", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: settings load SEH");
+		goto fail;
+	}
+
+	gbNoMovies = true;
+	startupDeactivate = TRUE;
+
+	__try {
+		RevcLog("ReVC_Init: before InitialiseOnceAfterRW");
+		if (!CGame::InitialiseOnceAfterRW())
+		{
+			RevcLog("ReVC_Init: InitialiseOnceAfterRW failed");
+			goto fail;
+		}
+		RevcLog("ReVC_Init: after InitialiseOnceAfterRW");
+	} __except(RevcSehFilter("ReVC_Init: exception in InitialiseOnceAfterRW", GetExceptionInformation())) {
+		RevcLog("ReVC_Init: InitialiseOnceAfterRW SEH");
+		goto fail;
+	}
+
+	RevcLog("ReVC_Init: ok");
+	return true;
+
+fail:
+	RevcLog("ReVC_Init: fail");
+	RsSetExternalD3D9Device(nil);
+	if(gRevcPrevCwd[0] != '\0')
+		SetCurrentDirectoryA(gRevcPrevCwd);
+	gRevcDllInitialized = FALSE;
+	return false;
+}
+
+static void
+RevcHandleKeyMessage(UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	RsKeyCodes ks;
+
+	switch(msg){
+	case WM_KEYDOWN:
+	case WM_SYSKEYDOWN:
+		if(_InputTranslateKey(&ks, lParam, wParam))
+			RsKeyboardEventHandler(rsKEYDOWN, &ks);
+		if(wParam == VK_SHIFT)
+			_InputTranslateShiftKeyUpDown(&ks);
+		break;
+	case WM_KEYUP:
+	case WM_SYSKEYUP:
+		if(_InputTranslateKey(&ks, lParam, wParam))
+			RsKeyboardEventHandler(rsKEYUP, &ks);
+		if(wParam == VK_SHIFT)
+			_InputTranslateShiftKeyUpDown(&ks);
+		break;
+	default:
+		break;
+	}
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_Run()
+{
+	MSG message;
+	RwInitialised = TRUE;
+	gGameState = GS_INIT_PLAYING_GAME;
+	RevcLog("ReVC_Run: begin");
+	RevcLog("ReVC_Run: %s", gRevcBuildId);
+	RevcLog("ReVC_Run: state quit=%d exit=%d gameState=%d", RsGlobal.quit, gRevcExitRequested, gGameState);
+	RevcLog("ReVC_Run: hwnd=%p PSGLOBAL(window)=%p", gRevcHwnd, PSGLOBAL(window));
+
+	while(!RsGlobal.quit && !gRevcExitRequested)
+	{
+		while(PeekMessage(&message, nil, 0U, 0U, PM_REMOVE|PM_NOYIELD))
+		{
+			if(message.message == WM_QUIT)
+			{
+				RsGlobal.quit = TRUE;
+				RevcLog("ReVC_Run: WM_QUIT received");
+				break;
+			}
+			RevcHandleKeyMessage(message.message, message.wParam, message.lParam);
+			TranslateMessage(&message);
+			DispatchMessage(&message);
+		}
+
+		// ensure the window stays responsive while VC runs
+		while(PeekMessage(&message, PSGLOBAL(window), 0U, 0U, PM_REMOVE|PM_NOYIELD))
+		{
+			RevcHandleKeyMessage(message.message, message.wParam, message.lParam);
+			TranslateMessage(&message);
+			DispatchMessage(&message);
+		}
+
+		if(GetAsyncKeyState(VK_F12) & 1)
+		{
+			RevcLog("ReVC_Run: F12 exit requested");
+			gRevcExitRequested = TRUE;
+		}
+
+		if(ForegroundApp)
+		{
+			switch(gGameState)
+			{
+				case GS_INIT_PLAYING_GAME:
+					RevcLog("ReVC_Run: GS_INIT_PLAYING_GAME");
+					__try {
+						RevcLog("ReVC_Run: pre-init size %d x %d", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+						if (RsGlobal.maximumWidth == 0 || RsGlobal.maximumHeight == 0) {
+							__try {
+								RevcLog("ReVC_Run: size fix start");
+							RECT rect;
+							BOOL haveRect = FALSE;
+							HWND hwnd = gRevcHwnd;
+							RevcLog("ReVC_Run: size fix hwnd=%p", hwnd);
+							if (hwnd != nil && GetClientRect(hwnd, &rect)) {
+									haveRect = TRUE;
+									RevcLog("ReVC_Run: client rect %ld x %ld", rect.right, rect.bottom);
+								} else {
+									RevcLog("ReVC_Run: GetClientRect failed or hwnd null");
+								}
+								if (haveRect && rect.right > 0 && rect.bottom > 0) {
+									RsGlobal.maximumWidth = rect.right;
+									RsGlobal.maximumHeight = rect.bottom;
+									RsGlobal.width = rect.right;
+									RsGlobal.height = rect.bottom;
+								}
+								if (RsGlobal.maximumWidth == 0 || RsGlobal.maximumHeight == 0) {
+									if (gRevcD3DDevice != nil) {
+										IDirect3DSurface9 *backBuffer = nil;
+										HRESULT hr = gRevcD3DDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer);
+										if (SUCCEEDED(hr) && backBuffer != nil) {
+											D3DSURFACE_DESC desc;
+											if (SUCCEEDED(backBuffer->GetDesc(&desc))) {
+												RevcLog("ReVC_Run: backbuffer %u x %u format %u", desc.Width, desc.Height, desc.Format);
+												RsGlobal.maximumWidth = (RwInt32)desc.Width;
+												RsGlobal.maximumHeight = (RwInt32)desc.Height;
+												RsGlobal.width = (RwInt32)desc.Width;
+												RsGlobal.height = (RwInt32)desc.Height;
+											}
+											backBuffer->Release();
+										} else {
+											RevcLog("ReVC_Run: GetBackBuffer failed hr=0x%08X", (unsigned)hr);
+										}
+									} else {
+										RevcLog("ReVC_Run: no D3D device for backbuffer size");
+									}
+								}
+								if (RsGlobal.maximumWidth == 0 || RsGlobal.maximumHeight == 0) {
+									RevcLog("ReVC_Run: window size still zero after fix attempts");
+								} else {
+									RevcLog("ReVC_Run: fixed window size to %d x %d", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+								}
+							} __except(RevcSehFilter("ReVC_Run: exception in size-fix", GetExceptionInformation())) {
+								RevcLog("ReVC_Run: size fix SEH");
+							}
+						}
+						RevcLog("ReVC_Run: calling CGame::Initialise (maxW=%d maxH=%d)", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+						CGame::Initialise("DATA\\GTA_VC.DAT");
+						gRevcGameInitialized = TRUE;
+					} __except(RevcSehFilter("ReVC_Run: exception in CGame::Initialise", GetExceptionInformation())) {
+						gRevcExitRequested = TRUE;
+						break;
+					}
+					FrontEndMenuManager.m_bGameNotLoaded = false;
+					gGameState = GS_PLAYING_GAME;
+					TRACE("gGameState = GS_PLAYING_GAME;");
+					break;
+				case GS_PLAYING_GAME:
+				{
+					float ms = (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond();
+					if (RwInitialised)
+					{
+						if (!FrontEndMenuManager.m_PrefsFrameLimiter || (1000.0f / (float)RsGlobal.maxFPS) < ms)
+						{
+							__try {
+								RsEventHandler(rsIDLE, (void *)TRUE);
+							} __except(RevcSehFilter("ReVC_Run: exception in rsIDLE", GetExceptionInformation())) {
+								gRevcExitRequested = TRUE;
+								break;
+							}
+						}
+					}
+					break;
+				}
+				default:
+					gGameState = GS_INIT_PLAYING_GAME;
+					break;
+			}
+		}
+		else
+		{
+			Sleep(1);
+		}
+	}
+
+	RevcLog("ReVC_Run: end");
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_Shutdown()
+{
+	RevcLog("ReVC_Shutdown: begin");
+	if (gRevcInputInitialized) {
+		__try {
+			_InputShutdown();
+			RevcLog("ReVC_Shutdown: _InputShutdown ok");
+		} __except(RevcSehFilter("ReVC_Shutdown: exception in _InputShutdown", GetExceptionInformation())) {
+			RevcLog("ReVC_Shutdown: _InputShutdown SEH");
+		}
+	} else {
+		RevcLog("ReVC_Shutdown: _InputShutdown skipped (not initialized)");
+	}
+	if (gRevcRwInitialized) {
+		__try {
+			RsEventHandler(rsRWTERMINATE, nil);
+			RevcLog("ReVC_Shutdown: rsRWTERMINATE ok");
+		} __except(RevcSehFilter("ReVC_Shutdown: exception in rsRWTERMINATE", GetExceptionInformation())) {
+			RevcLog("ReVC_Shutdown: rsRWTERMINATE SEH");
+		}
+	} else {
+		RevcLog("ReVC_Shutdown: rsRWTERMINATE skipped (not initialized)");
+	}
+	__try {
+		RsEventHandler(rsTERMINATE, nil);
+		RevcLog("ReVC_Shutdown: rsTERMINATE ok");
+	} __except(RevcSehFilter("ReVC_Shutdown: exception in rsTERMINATE", GetExceptionInformation())) {
+		RevcLog("ReVC_Shutdown: rsTERMINATE SEH");
+	}
+	__try {
+		RsSetExternalD3D9Device(nil);
+		RevcLog("ReVC_Shutdown: RsSetExternalD3D9Device(nil) ok");
+	} __except(RevcSehFilter("ReVC_Shutdown: exception in RsSetExternalD3D9Device", GetExceptionInformation())) {
+		RevcLog("ReVC_Shutdown: RsSetExternalD3D9Device SEH");
+	}
+
+	if(gRevcPrevCwd[0] != '\0')
+		SetCurrentDirectoryA(gRevcPrevCwd);
+
+	RwInitialised = FALSE;
+	gRevcDllInitialized = FALSE;
+	gRevcExitRequested = FALSE;
+	gRevcGameInitialized = FALSE;
+	RevcLog("ReVC_Shutdown: end");
+}
 #endif
 
 /*
@@ -1358,6 +1825,26 @@ RwBool IsForegroundApp()
 	return !!ForegroundApp;
 }
 
+#ifdef REVC_DLL
+RwBool
+psSelectDevice()
+{
+	RwVideoMode vm;
+	if (!RwEngineSetSubSystem(0))
+		return FALSE;
+	if (RwEngineGetVideoModeInfo(&vm, 0) == nil)
+		return FALSE;
+	if (!RwEngineSetVideoMode(0))
+		return FALSE;
+
+	RsGlobal.maximumWidth = vm.width;
+	RsGlobal.maximumHeight = vm.height;
+	RsGlobal.width = vm.width;
+	RsGlobal.height = vm.height;
+	PSGLOBAL(fullScreen) = TRUE;
+	return TRUE;
+}
+#else
 UINT GetBestRefreshRate(UINT width, UINT height, UINT depth)
 {
 #ifdef USE_D3D9
@@ -1411,10 +1898,12 @@ UINT GetBestRefreshRate(UINT width, UINT height, UINT depth)
 
 	return refreshRate;
 }
+#endif // REVC_DLL
 
 /*
  *****************************************************************************
  */
+#ifndef REVC_DLL
 RwBool
 psSelectDevice()
 {
@@ -1642,6 +2131,7 @@ psSelectDevice()
 #endif
 	return TRUE;
 }
+#endif // !REVC_DLL
 
 /*
  *****************************************************************************
@@ -2006,6 +2496,7 @@ void HandleExit()
 /*
  *****************************************************************************
  */
+#ifndef REVC_DLL
 int PASCAL
 WinMain(HINSTANCE instance, 
 		HINSTANCE prevInstance	__RWUNUSED__, 
@@ -2636,6 +3127,7 @@ WinMain(HINSTANCE instance,
 
 	return message.wParam;
 }
+#endif // REVC_DLL
 
 /*
  *****************************************************************************

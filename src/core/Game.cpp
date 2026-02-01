@@ -82,6 +82,18 @@
 #include "Weather.h"
 #include "World.h"
 #include "ZoneCull.h"
+
+static FILE *gRevcGameLog = nil;
+static void RevcLogGame(const char *tag, const char *msg)
+{
+	if(gRevcGameLog == nil){
+		gRevcGameLog = fopen("revc_in_sa.log", "a");
+	}
+	if(gRevcGameLog == nil)
+		return;
+	fprintf(gRevcGameLog, "%s: %s\n", tag, msg);
+	fflush(gRevcGameLog);
+}
 #include "Zones.h"
 #include "Occlusion.h"
 #include "debugmenu.h"
@@ -95,6 +107,9 @@
 #ifdef USE_TEXTURE_POOL
 #include "TexturePools.h"
 #endif
+#include <windows.h>
+#include <string.h>
+#include <stdio.h>
 
 eLevelName CGame::currLevel;
 int32 CGame::currArea;
@@ -191,6 +206,7 @@ void ReplaceAtomicPipeCallback();
 bool
 CGame::InitialiseRenderWare(void)
 {
+	RevcLogGame("InitRW", "begin");
 	ValidateVersion();
 #ifdef USE_TEXTURE_POOL
 	_TexturePoolsInitialise();
@@ -211,6 +227,13 @@ CGame::InitialiseRenderWare(void)
 
 	/* Create camera */
 	Scene.camera = CameraCreate(SCREEN_WIDTH, SCREEN_HEIGHT, TRUE);
+	if (Scene.camera != nil) {
+		char buf[128];
+		sprintf(buf, "CameraCreate ok %p", Scene.camera);
+		RevcLogGame("InitRW", buf);
+	} else {
+		RevcLogGame("InitRW", "CameraCreate failed");
+	}
 	ASSERT(Scene.camera != nil);
 	if (!Scene.camera)
 	{
@@ -229,6 +252,13 @@ CGame::InitialiseRenderWare(void)
 	bbox.inf.x = bbox.inf.y = bbox.inf.z = -10000.0f;
 
 	Scene.world = RpWorldCreate(&bbox);
+	if (Scene.world != nil) {
+		char buf[128];
+		sprintf(buf, "RpWorldCreate ok %p", Scene.world);
+		RevcLogGame("InitRW", buf);
+	} else {
+		RevcLogGame("InitRW", "RpWorldCreate failed");
+	}
 	ASSERT(Scene.world != nil);
 	if (!Scene.world)
 	{
@@ -239,6 +269,7 @@ CGame::InitialiseRenderWare(void)
 	
 	/* Add the camera to the world */
 	RpWorldAddCamera(Scene.world, Scene.camera);
+	RevcLogGame("InitRW", "RpWorldAddCamera ok");
 	LightsCreate(Scene.world);
 
 	CreateDebugFont();
@@ -320,17 +351,29 @@ void CGame::ShutdownRenderWare(void)
 
 bool CGame::InitialiseOnceAfterRW(void)
 {
+	RevcLogGame("InitAfterRW", "begin");
 	TheText.Load();
+	RevcLogGame("InitAfterRW", "after TheText.Load");
 	CTimer::Initialise();
+	RevcLogGame("InitAfterRW", "after CTimer::Initialise");
 	CTempColModels::Initialise();
+	RevcLogGame("InitAfterRW", "after CTempColModels::Initialise");
 	mod_HandlingManager.Initialise();
+	RevcLogGame("InitAfterRW", "after mod_HandlingManager::Initialise");
 	CSurfaceTable::Initialise("DATA\\SURFACE.DAT");
+	RevcLogGame("InitAfterRW", "after CSurfaceTable::Initialise");
 	CPedStats::Initialise();
+	RevcLogGame("InitAfterRW", "after CPedStats::Initialise");
 	CTimeCycle::Initialise();
+	RevcLogGame("InitAfterRW", "after CTimeCycle::Initialise");
 #ifdef GTA_PS2
 	LoadingScreen("Loading the Game", "Initialising audio", GetRandomSplashScreen());
 #endif
+#ifdef REVC_DLL
+	RevcLogGame("InitAfterRW", "skipping DMAudio::Initialise (REVC_DLL)");
+#else
 	DMAudio.Initialise();
+	RevcLogGame("InitAfterRW", "after DMAudio::Initialise");
 
 #ifndef GTA_PS2
 #ifdef EXTERNAL_3D_SOUND
@@ -347,11 +390,18 @@ bool CGame::InitialiseOnceAfterRW(void)
 	DMAudio.SetSpeakerConfig(FrontEndMenuManager.m_PrefsSpeakers);
 #endif
 	DMAudio.SetDynamicAcousticModelingStatus(FrontEndMenuManager.m_PrefsDMA);
+	RevcLogGame("InitAfterRW", "after DMAudio::SetDynamicAcousticModelingStatus");
 	DMAudio.SetMusicMasterVolume(FrontEndMenuManager.m_PrefsMusicVolume);
+	RevcLogGame("InitAfterRW", "after DMAudio::SetMusicMasterVolume");
 	DMAudio.SetEffectsMasterVolume(FrontEndMenuManager.m_PrefsSfxVolume);
+	RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsMasterVolume");
 	DMAudio.SetEffectsFadeVol(127);
+	RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsFadeVol");
 	DMAudio.SetMusicFadeVol(127);
+	RevcLogGame("InitAfterRW", "after DMAudio::SetMusicFadeVol");
 #endif
+#endif
+	RevcLogGame("InitAfterRW", "end");
 	return true;
 }
 
@@ -365,14 +415,38 @@ CGame::FinalShutdown(void)
 
 bool CGame::Initialise(const char* datFile)
 {
+	static FILE *gInitLog = nil;
+	auto logStep = [&](const char *msg) {
+		if(gInitLog == nil){
+			char exePath[MAX_PATH];
+			GetModuleFileNameA(nil, exePath, MAX_PATH);
+			char *slash = strrchr(exePath, '\\');
+			if(slash) *(slash + 1) = '\0';
+			char logPath[MAX_PATH];
+			strcpy(logPath, exePath);
+			strcat(logPath, "revc_in_sa.log");
+			gInitLog = fopen(logPath, "a");
+		}
+		if(gInitLog == nil)
+			return;
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		fprintf(gInitLog, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] CGame::Initialise: %s\n",
+			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+		fflush(gInitLog);
+	};
+
+	logStep("begin");
 	ResetLoadingScreenBar();
 	strcpy(aDatFile, datFile);
+	logStep("after ResetLoadingScreenBar + aDatFile");
 
 #ifdef GTA_PS2
 	// TODO: upload VU0 collision code here
 #endif
 
 	CPools::Initialise();
+	logStep("after CPools::Initialise");
 
 #ifndef GTA_PS2
 #ifdef PED_CAR_DENSITY_SLIDERS
@@ -381,6 +455,7 @@ bool CGame::Initialise(const char* datFile)
 #endif
 		CIniFile::LoadIniFile();
 #endif
+	logStep("after CIniFile::LoadIniFile");
 #ifdef USE_TEXTURE_POOL
 	_TexturePoolsUnknown(false);
 #endif
@@ -389,9 +464,27 @@ bool CGame::Initialise(const char* datFile)
 
 	PUSH_MEMID(MEMID_TEXTURES);
 	LoadingScreen("Loading the Game", "Loading generic textures", GetRandomSplashScreen());
+	logStep("after LoadingScreen generic textures");
+	logStep("before CTxdStore::AddTxdSlot generic");
+	CTxdStore::Initialise();
+	logStep("after CTxdStore::Initialise (forced)");
 	gameTxdSlot = CTxdStore::AddTxdSlot("generic");
+	logStep("after CTxdStore::AddTxdSlot generic");
+	{
+		char buf[128];
+		sprintf(buf, "gameTxdSlot=%d", gameTxdSlot);
+		logStep(buf);
+	}
+	{
+		char buf[128];
+		sprintf(buf, "Scene.camera=%p", Scene.camera);
+		logStep(buf);
+	}
 	CTxdStore::Create(gameTxdSlot);
+	logStep("after CTxdStore::Create generic");
 	CTxdStore::AddRef(gameTxdSlot);
+	logStep("after CTxdStore::AddRef generic");
+	logStep("after CTxdStore generic");
 
 #ifdef EXTENDED_PIPELINES
 	// for generic fallback
@@ -404,6 +497,7 @@ bool CGame::Initialise(const char* datFile)
 	CTxdStore::AddRef(particleTxdSlot);
 	CTxdStore::SetCurrentTxd(gameTxdSlot);
 	LoadingScreen("Loading the Game", "Setup game variables", nil);
+	logStep("after particle txd + setup vars");
 	POP_MEMID();
 
 #ifdef GTA_PS2
@@ -411,6 +505,7 @@ bool CGame::Initialise(const char* datFile)
 #endif
 
 	CGameLogic::InitAtStartOfGame();
+	logStep("after CGameLogic::InitAtStartOfGame");
 	CReferences::Init();
 	TheCamera.Init();
 	TheCamera.SetRwCamera(Scene.camera);
@@ -429,14 +524,17 @@ bool CGame::Initialise(const char* datFile)
 	CMessages::ClearAllMessagesDisplayedByGame();
 	CRecordDataForGame::Init();
 	CRestart::Initialise();
+	logStep("after core inits block");
 
 	PUSH_MEMID(MEMID_WORLD);
 	CWorld::Initialise();
 	POP_MEMID();
+	logStep("after CWorld::Initialise");
 
 	PUSH_MEMID(MEMID_TEXTURES);
 	CParticle::Initialise();
 	POP_MEMID();
+	logStep("after CParticle::Initialise");
 
 	PUSH_MEMID(MEMID_ANIMATION);
 	CAnimManager::Initialise();
@@ -453,10 +551,31 @@ bool CGame::Initialise(const char* datFile)
 	CPickups::Init();
 	CTheCarGenerators::Init();
 
+	{
+		char buf[256];
+		DWORD attrs = GetFileAttributesA("MODELS\\GTA3.IMG");
+		sprintf(buf, "GTA3.IMG exists=%d attrs=0x%08X", attrs != INVALID_FILE_ATTRIBUTES, (unsigned)attrs);
+		logStep(buf);
+	}
 	CdStreamAddImage("MODELS\\GTA3.IMG");
+	logStep("after CdStreamAddImage GTA3.IMG");
 
+	{
+		char buf[256];
+		DWORD attrs = GetFileAttributesA("DATA\\DEFAULT.DAT");
+		sprintf(buf, "DEFAULT.DAT exists=%d attrs=0x%08X", attrs != INVALID_FILE_ATTRIBUTES, (unsigned)attrs);
+		logStep(buf);
+	}
 	CFileLoader::LoadLevel("DATA\\DEFAULT.DAT");
+	logStep("after LoadLevel DEFAULT.DAT");
+	{
+		char buf[256];
+		DWORD attrs = GetFileAttributesA(datFile);
+		sprintf(buf, "datFile exists=%d attrs=0x%08X path=%s", attrs != INVALID_FILE_ATTRIBUTES, (unsigned)attrs, datFile);
+		logStep(buf);
+	}
 	CFileLoader::LoadLevel(datFile);
+	logStep("after LoadLevel datFile");
 
 	LoadingScreen("Loading the Game", "Add Particles", nil);
 	CWorld::AddParticles();
@@ -561,9 +680,20 @@ bool CGame::Initialise(const char* datFile)
 	if ( !TheMemoryCard.m_bWantToLoad )
 #endif
 	{
-		CTheScripts::StartTestScript();
-		CTheScripts::Process();
-		TheCamera.Process();
+	CTheScripts::StartTestScript();
+	CTheScripts::Process();
+	TheCamera.Process();
+	{
+		char buf[256];
+		CPlayerPed *ped = FindPlayerPed();
+		if(ped){
+			CVector pos = ped->GetPosition();
+			sprintf(buf, "post StartTestScript: playerPed=%p pos=%.2f %.2f %.2f", ped, pos.x, pos.y, pos.z);
+		}else{
+			sprintf(buf, "post StartTestScript: playerPed=nil");
+		}
+		logStep(buf);
+	}
 	}
 
 	LoadingScreen("Loading the Game", "Load scene", nil);

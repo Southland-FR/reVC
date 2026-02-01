@@ -858,9 +858,7 @@ cSampleManager::Initialise(void)
 		const char* ext=(const char*)alGetString(AL_EXTENSIONS);
 		if ( strstr(ext,"AL_SOFT_loop_points")==NULL )
 		{
-			ASSERT(strstr(ext, "AL_SOFT_loop_points") != NULL);
-			Terminate();
-			return FALSE;
+			debug("OpenAL missing AL_SOFT_loop_points; continuing without loop point support\n");
 		}
 		
 		alListenerf (AL_GAIN,     1.0f);

@@ -20,7 +20,7 @@ header_directories(${PROJECT}_INCLUDES)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/extras/GitSHA1.cpp.in" "${CMAKE_CURRENT_BINARY_DIR}/extras/GitSHA1.cpp" @ONLY)
 list(APPEND ${PROJECT}_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/extras/GitSHA1.cpp")
 
-add_executable(${EXECUTABLE} WIN32
+add_library(${EXECUTABLE} SHARED
     ${${PROJECT}_SOURCES}
 )
 
@@ -40,6 +40,7 @@ target_compile_definitions(${EXECUTABLE}
         $<IF:$<CONFIG:DEBUG>,DEBUG,NDEBUG>
         LIBRW
         CMAKE_NO_AUTOLINK
+        REVC_DLL
 )
 
 if(LIBRW_PLATFORM_D3D9)
@@ -61,6 +62,9 @@ if(${PROJECT}_AUDIO STREQUAL "OAL")
         target_link_libraries(${EXECUTABLE} PRIVATE ${OPENAL_LIBRARY})
         target_compile_definitions(${EXECUTABLE} PRIVATE ${OPENAL_DEFINITIONS})
     endif()
+    target_include_directories(${EXECUTABLE} PRIVATE
+        "${PROJECT_SOURCE_DIR}/vendor/openal-soft/include"
+    )
     target_compile_definitions(${EXECUTABLE} PRIVATE AUDIO_OAL)
 elseif(${PROJECT}_AUDIO STREQUAL "MSS")
     find_package(MilesSDK REQUIRED)

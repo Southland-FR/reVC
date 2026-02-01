@@ -381,6 +381,12 @@ CPostFX::NeedFrontBuffer(int32 type)
 void
 CPostFX::GetBackBuffer(RwCamera *cam)
 {
+	debug("CPostFX::GetBackBuffer: cam=%p pBackBuffer=%p\n", cam, pBackBuffer);
+  if(pBackBuffer == nil)
+    Open(cam);
+  debug("CPostFX::GetBackBuffer: after Open pBackBuffer=%p\n", pBackBuffer);
+  if(pBackBuffer == nil)
+    return;
 	RwRasterPushContext(pBackBuffer);
 	RwRasterRenderFast(RwCameraGetRaster(cam), 0, 0);
 	RwRasterPopContext();

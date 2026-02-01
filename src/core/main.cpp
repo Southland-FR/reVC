@@ -1,4 +1,7 @@
 #include "common.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <time.h>
 #include "rpmatfx.h"
 #include "rphanim.h"
@@ -78,6 +81,29 @@
 #ifdef USE_OUR_VERSIONING
 #include "GitSHA1.h"
 #endif
+
+extern int gRevcBackBufferWidth;
+extern int gRevcBackBufferHeight;
+
+static FILE *gRevcCoreLog = nil;
+static uint32 gRevcFrameLogCount = 0;
+static void RevcLogCore(const char *msg)
+{
+	if(gRevcCoreLog == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gRevcCoreLog = fopen(logPath, "a");
+	}
+	if(gRevcCoreLog == nil)
+		return;
+	fprintf(gRevcCoreLog, "Core: %s\n", msg);
+	fflush(gRevcCoreLog);
+}
 
 GlobalScene Scene;
 
@@ -208,7 +234,20 @@ DoRWStuffStartOfFrame(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomR
 	CRGBA BottomColor(BottomRed, BottomGreen, BottomBlue, Alpha);
 
 	CDraw::CalculateAspectRatio();
+#ifdef REVC_DLL
+	RwRect rect;
+	RwRect *prect = nil;
+	if(gRevcBackBufferWidth > 0 && gRevcBackBufferHeight > 0){
+		rect.x = 0;
+		rect.y = 0;
+		rect.w = gRevcBackBufferWidth;
+		rect.h = gRevcBackBufferHeight;
+		prect = &rect;
+	}
+	CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#else
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#endif
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
 	RwCameraClear(Scene.camera, &TopColor.rwRGBA, CLEARMODE);
 
@@ -361,8 +400,19 @@ DoRWStuffEndOfFrame(void)
 	CDebug::DisplayScreenStrings();	// custom
 	CDebug::DebugDisplayTextBuffer();
 	FlushObrsPrintfs();
-	RwCameraEndUpdate(Scene.camera);
-	RsCameraShowRaster(Scene.camera);
+	RevcLogCore("DoRWStuffEndOfFrame: begin");
+	__try {
+		RwCameraEndUpdate(Scene.camera);
+		RevcLogCore("DoRWStuffEndOfFrame: after RwCameraEndUpdate");
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		RevcLogCore("DoRWStuffEndOfFrame: RwCameraEndUpdate SEH");
+	}
+	__try {
+		RsCameraShowRaster(Scene.camera);
+		RevcLogCore("DoRWStuffEndOfFrame: after RsCameraShowRaster");
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		RevcLogCore("DoRWStuffEndOfFrame: RsCameraShowRaster SEH");
+	}
 #ifndef MASTER
 	char s[48];
 #ifdef THIS_IS_STUPID
@@ -520,6 +570,7 @@ PreAllocateRwObjects(void)
 static RwBool 
 Initialise3D(void *param)
 {
+	RevcLogCore("Initialise3D begin");
 	PUSH_MEMID(MEMID_RENDER);
 
 #ifndef MASTER
@@ -529,14 +580,21 @@ Initialise3D(void *param)
 
 	if (RsRwInitialize(param))
 	{
+		RevcLogCore("Initialise3D RsRwInitialize ok");
 		POP_MEMID();
 
 #ifdef DEBUGMENU
 		DebugMenuInit();
 		DebugMenuPopulate();
 #endif // !DEBUGMENU
-		return CGame::InitialiseRenderWare();
+		if (CGame::InitialiseRenderWare()) {
+			RevcLogCore("Initialise3D InitialiseRenderWare ok");
+			return true;
+		}
+		RevcLogCore("Initialise3D InitialiseRenderWare failed");
+		return false;
 	}
+	RevcLogCore("Initialise3D RsRwInitialize failed");
 	POP_MEMID();
 
 	return (FALSE);
@@ -1531,24 +1589,57 @@ Render2dStuffAfterFade(void)
 void
 Idle(void *arg)
 {
+	RevcLogCore("Idle: begin");
+	if(gRevcFrameLogCount < 120){
+		char buf[256];
+		CPlayerPed *ped = FindPlayerPed();
+		if(ped){
+			CVector pos = ped->GetPosition();
+			sprintf(buf, "Idle: playerPed=%p pos=%.2f %.2f %.2f", ped, pos.x, pos.y, pos.z);
+		}else{
+			sprintf(buf, "Idle: playerPed=nil");
+		}
+		RevcLogCore(buf);
+		if(Scene.camera){
+			CVector cpos = Scene.camera->getFrame()->getLTM()->pos;
+			CVector at = Scene.camera->getFrame()->getLTM()->at;
+			RwRaster *r = RwCameraGetRaster(Scene.camera);
+			if(r){
+				sprintf(buf, "Idle: camera pos=%.2f %.2f %.2f at=%.2f %.2f %.2f raster=%dx%d", cpos.x, cpos.y, cpos.z, at.x, at.y, at.z, r->width, r->height);
+			}else{
+				sprintf(buf, "Idle: camera pos=%.2f %.2f %.2f at=%.2f %.2f %.2f raster=nil", cpos.x, cpos.y, cpos.z, at.x, at.y, at.z);
+			}
+			RevcLogCore(buf);
+		}else{
+			RevcLogCore("Idle: Scene.camera=nil");
+		}
+		gRevcFrameLogCount++;
+	}
 	CTimer::Update();
+	RevcLogCore("Idle: after CTimer::Update");
 
 	tbInit();
+	RevcLogCore("Idle: after tbInit");
 
 	CSprite2d::InitPerFrame();
+	RevcLogCore("Idle: after CSprite2d::InitPerFrame");
 	CFont::InitPerFrame();
+	RevcLogCore("Idle: after CFont::InitPerFrame");
 
 	PUSH_MEMID(MEMID_GAME_PROCESS);
 	CPointLights::InitPerFrame();
+	RevcLogCore("Idle: after CPointLights::InitPerFrame");
 
 	tbStartTimer(0, "CGame::Process");
 	CGame::Process();
 	tbEndTimer("CGame::Process");
+	RevcLogCore("Idle: after CGame::Process");
 	POP_MEMID();
 
 	tbStartTimer(0, "DMAudio.Service");
 	DMAudio.Service();
 	tbEndTimer("DMAudio.Service");
+	RevcLogCore("Idle: after DMAudio.Service");
 
 	if(CGame::bDemoMode && CTimer::GetTimeInMilliseconds() > (3*60 + 30)*1000 && !CCutsceneMgr::IsCutsceneProcessing()){
 		WANT_TO_LOAD = false;
@@ -1558,42 +1649,69 @@ Idle(void *arg)
 
 	if(FrontEndMenuManager.m_bWantToRestart || FOUND_GAME_TO_LOAD)
 	{
+		RevcLogCore("Idle: early return (restart/load)");
 		return;
 	}
 	
 	SetLightsWithTimeOfDayColour(Scene.world);
+	RevcLogCore("Idle: after SetLightsWithTimeOfDayColour");
 
 	if(arg == nil)
+	{
+		RevcLogCore("Idle: arg nil, return");
 		return;
+	}
 
 	PUSH_MEMID(MEMID_RENDER);
+	RevcLogCore("Idle: MEMID_RENDER begin");
 
-	if(!FrontEndMenuManager.m_bMenuActive && TheCamera.GetScreenFadeStatus() != FADE_2)
+	int menuActive = 0;
+	int fadeStatus = -999;
+	__try {
+		menuActive = FrontEndMenuManager.m_bMenuActive ? 1 : 0;
+		fadeStatus = TheCamera.GetScreenFadeStatus();
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		RevcLogCore("Idle: exception reading menu/fade status");
+		goto popret;
+	}
 	{
+		char buf[64];
+		sprintf(buf, "Idle: menuActive=%d fadeStatus=%d", menuActive, fadeStatus);
+		RevcLogCore(buf);
+	}
+
+	if(!menuActive && fadeStatus != FADE_2)
+	{
+		RevcLogCore("Idle: render branch start");
 		// This is from SA, but it's nice for windowed mode
 #if defined(GTA_PC) && !defined(RW_GL3)
 		RwV2d pos;
 		pos.x = SCREEN_WIDTH / 2.0f;
 		pos.y = SCREEN_HEIGHT / 2.0f;
 		RsMouseSetPos(&pos);
+		RevcLogCore("Idle: after RsMouseSetPos");
 #endif
 
 		tbStartTimer(0, "CnstrRenderList");
 #ifdef PC_WATER
 		CWaterLevel::PreCalcWaterGeometry();
+		RevcLogCore("Idle: after CWaterLevel::PreCalcWaterGeometry");
 #endif
 #ifdef NEW_RENDERER
 		if(gbNewRenderer){
 			CWorld::AdvanceCurrentScanCode();	// don't think this is even necessary
 			CRenderer::ClearForFrame();
+			RevcLogCore("Idle: after CRenderer::ClearForFrame");
 		}
 #endif
 		CRenderer::ConstructRenderList();
 		tbEndTimer("CnstrRenderList");
+		RevcLogCore("Idle: after CRenderer::ConstructRenderList");
 
 		tbStartTimer(0, "PreRender");
 		CRenderer::PreRender();
 		tbEndTimer("PreRender");
+		RevcLogCore("Idle: after CRenderer::PreRender");
 
 #ifdef FIX_BUGS
 		RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void *)FALSE); // TODO: temp? this fixes OpenGL render but there should be a better place for this
@@ -1603,16 +1721,20 @@ Idle(void *arg)
 #endif
 
 		if(CWeather::LightningFlash && !CCullZones::CamNoRain()){
+			RevcLogCore("Idle: lightning branch");
 			if(!DoRWStuffStartOfFrame_Horizon(255, 255, 255, 255, 255, 255, 255))
 				goto popret;
 		}else{
+			RevcLogCore("Idle: normal sky branch");
 			if(!DoRWStuffStartOfFrame_Horizon(CTimeCycle::GetSkyTopRed(), CTimeCycle::GetSkyTopGreen(), CTimeCycle::GetSkyTopBlue(),
 						CTimeCycle::GetSkyBottomRed(), CTimeCycle::GetSkyBottomGreen(), CTimeCycle::GetSkyBottomBlue(),
 						255))
 				goto popret;
 		}
+		RevcLogCore("Idle: after DoRWStuffStartOfFrame_Horizon");
 
 		DefinedState();
+		RevcLogCore("Idle: after DefinedState");
 
 #ifndef FIX_BUGS
 		RwCameraSetFarClipPlane(Scene.camera, CTimeCycle::GetFarClip());
@@ -1622,47 +1744,103 @@ Idle(void *arg)
 		tbStartTimer(0, "RenderScene");
 		RenderScene();
 		tbEndTimer("RenderScene");
+		RevcLogCore("Idle: after RenderScene");
 
 #ifdef EXTENDED_PIPELINES
 		CustomPipes::EnvMapRender();
 #endif
 
 		RenderDebugShit();
+		RevcLogCore("Idle: after RenderDebugShit");
 		RenderEffects();
+		RevcLogCore("Idle: after RenderEffects");
 
 		if((TheCamera.m_BlurType == MOTION_BLUR_NONE || TheCamera.m_BlurType == MOTION_BLUR_LIGHT_SCENE) &&
 		   TheCamera.m_ScreenReductionPercentage > 0.0f)
 		        TheCamera.SetMotionBlurAlpha(150);
 
-#ifdef SCREEN_DROPLETS
+#if defined(SCREEN_DROPLETS) && !defined(REVC_DLL)
+		RevcLogCore("Idle: before ScreenDroplets");
 		CPostFX::GetBackBuffer(Scene.camera);
+		RevcLogCore("Idle: after CPostFX::GetBackBuffer");
 		ScreenDroplets::Process();
+		RevcLogCore("Idle: after ScreenDroplets::Process");
 		ScreenDroplets::Render();
+		RevcLogCore("Idle: after ScreenDroplets::Render");
 #endif
 
 		tbStartTimer(0, "RenderMotionBlur");
+		RevcLogCore("Idle: before RenderMotionBlur");
+#ifdef REVC_DLL
+		RevcLogCore("Idle: RenderMotionBlur skipped (REVC_DLL)");
+#else
 		TheCamera.RenderMotionBlur();
+		RevcLogCore("Idle: after RenderMotionBlur");
+#endif
 		tbEndTimer("RenderMotionBlur");
 
 		tbStartTimer(0, "Render2dStuff");
+		RevcLogCore("Idle: before Render2dStuff");
 		Render2dStuff();
+		RevcLogCore("Idle: after Render2dStuff");
 		tbEndTimer("Render2dStuff");
 	}else{
-		CDraw::CalculateAspectRatio();
-#ifdef ASPECT_RATIO_SCALE
-		CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
-#else
-		CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, DEFAULT_ASPECT_RATIO);
+		RevcLogCore("Idle: menu branch start");
+		__try {
+			CDraw::CalculateAspectRatio();
+			RevcLogCore("Idle: after CDraw::CalculateAspectRatio");
+#ifdef REVC_DLL
+			RwRect rect;
+			RwRect *prect = nil;
+			if(gRevcBackBufferWidth > 0 && gRevcBackBufferHeight > 0){
+				rect.x = 0;
+				rect.y = 0;
+				rect.w = gRevcBackBufferWidth;
+				rect.h = gRevcBackBufferHeight;
+				prect = &rect;
+			}
 #endif
-		CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
-		RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
-		if(!RsCameraBeginUpdate(Scene.camera))
+#ifdef ASPECT_RATIO_SCALE
+#ifdef REVC_DLL
+			CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#else
+			CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#endif
+#else
+#ifdef REVC_DLL
+			CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, DEFAULT_ASPECT_RATIO);
+#else
+			CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, DEFAULT_ASPECT_RATIO);
+#endif
+#endif
+			RevcLogCore("Idle: after CameraSize");
+			CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
+			RevcLogCore("Idle: after CVisibilityPlugins::SetRenderWareCamera");
+			RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
+			RevcLogCore("Idle: after RwCameraClear");
+			{
+				char buf[128];
+				sprintf(buf, "Idle: Scene.camera=%p raster=%p", Scene.camera, RwCameraGetRaster(Scene.camera));
+				RevcLogCore(buf);
+			}
+			__try {
+				if(!RsCameraBeginUpdate(Scene.camera))
+					goto popret;
+			} __except(EXCEPTION_EXECUTE_HANDLER) {
+				RevcLogCore("Idle: RsCameraBeginUpdate SEH");
+				goto popret;
+			}
+			RevcLogCore("Idle: after RsCameraBeginUpdate (menu)");
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			RevcLogCore("Idle: menu branch SEH");
 			goto popret;
+		}
 	}
 
 	tbStartTimer(0, "RenderMenus");
 	RenderMenus();
 	tbEndTimer("RenderMenus");
+	RevcLogCore("Idle: after RenderMenus");
 
 #ifdef PS2_MENU
 	if ( TheMemoryCard.m_bWantToLoad )
@@ -1672,10 +1850,19 @@ Idle(void *arg)
 	tbStartTimer(0, "DoFade");
 	DoFade();
 	tbEndTimer("DoFade");
+	RevcLogCore("Idle: after DoFade");
 
 	tbStartTimer(0, "Render2dStuff-Fade");
 	Render2dStuffAfterFade();
 	tbEndTimer("Render2dStuff-Fade");
+	RevcLogCore("Idle: after Render2dStuffAfterFade");
+#ifdef REVC_DLL
+	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
+	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)FALSE);
+	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
+	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, nil);
+	RevcLogCore("Idle: debug quad disabled");
+#endif
 	// CCredits::Render(); // They added it to function above and also forgot it here
 #ifdef XBOX_MESSAGE_SCREEN
 	FrontEndMenuManager.DrawOverlays();
@@ -1685,8 +1872,13 @@ Idle(void *arg)
 		tbDisplay();
 
 	DoRWStuffEndOfFrame();
+	RevcLogCore("Idle: after DoRWStuffEndOfFrame");
+#ifdef REVC_DLL
+	Sleep(16);
+#endif
 
 	POP_MEMID();	// MEMID_RENDER
+	RevcLogCore("Idle: end");
 
 	if(g_SlowMode) 
 		ProcessSlowMode();
@@ -1753,14 +1945,16 @@ AppEventHandler(RsEvent event, void *param)
 			return rsEVENTPROCESSED;
 		}
 
-		case rsRWINITIALIZE:
-		{
-			return Initialise3D(param) ? rsEVENTPROCESSED : rsEVENTERROR;
-		}
+	case rsRWINITIALIZE:
+	{
+		RevcLogCore("AppEventHandler rsRWINITIALIZE");
+		return Initialise3D(param) ? rsEVENTPROCESSED : rsEVENTERROR;
+	}
 
-		case rsRWTERMINATE:
-		{
-			Terminate3D();
+	case rsRWTERMINATE:
+	{
+		RevcLogCore("AppEventHandler rsRWTERMINATE");
+		Terminate3D();
 
 			return rsEVENTPROCESSED;
 		}

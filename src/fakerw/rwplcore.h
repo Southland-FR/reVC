@@ -1,6 +1,12 @@
 #ifndef __GTA_RWPLCORE_H__
 #define __GTA_RWPLCORE_H__
 
+#ifdef RW_D3D9
+struct IDirect3D9;
+struct IDirect3DDevice9;
+struct _D3DPRESENT_PARAMETERS;
+#endif
+
 typedef rw::int8 RwInt8;
 typedef rw::int16 RwInt16;
 typedef rw::int32 RwInt32;
@@ -433,6 +439,12 @@ RwBool RwRenderStateSet(RwRenderState state, void *value);
 struct RwEngineOpenParams
 {
 	void    *displayID;
+#ifdef RW_D3D9
+	IDirect3D9 *d3d9;
+	IDirect3DDevice9 *device;
+	_D3DPRESENT_PARAMETERS *present;
+	RwBool externalDevice;
+#endif
 };
 
 typedef rw::SubSystemInfo RwSubSystemInfo;
