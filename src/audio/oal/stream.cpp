@@ -22,6 +22,29 @@
 
 #include <queue>
 #include <utility>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static FILE *gAudioLog4 = nil;
+static void
+AudioLog4(const char *msg)
+{
+	if(gAudioLog4 == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gAudioLog4 = fopen(logPath, "a");
+	}
+	if(gAudioLog4 == nil)
+		return;
+	fprintf(gAudioLog4, "Audio: %s\n", msg);
+	fflush(gAudioLog4);
+}
 
 #ifdef MULTITHREADED_AUDIO
 #include <iostream>
@@ -1195,20 +1218,33 @@ void audioFileOpsThread()
 
 void CStream::Initialise()
 {
+#ifdef AUDIO_OAL_USE_SNDFILE
+	AudioLog4("CStream::Initialise: SNDFILE enabled");
+#endif
 #ifdef AUDIO_OAL_USE_MPG123
+	AudioLog4("CStream::Initialise: MPG123 enabled");
 	mpg123_init();
 #endif
-#ifdef MULTITHREADED_AUDIO
-	gAudioThread = std::thread(audioFileOpsThread);
+#ifdef AUDIO_OAL_USE_OPUS
+	AudioLog4("CStream::Initialise: OPUS enabled");
 #endif
+#ifdef MULTITHREADED_AUDIO
+	AudioLog4("CStream::Initialise: MULTITHREADED_AUDIO enabled");
+	gAudioThread = std::thread(audioFileOpsThread);
+#else
+	AudioLog4("CStream::Initialise: MULTITHREADED_AUDIO disabled");
+#endif
+	AudioLog4("CStream::Initialise done");
 }
 
 void CStream::Terminate()
 {
 #ifdef AUDIO_OAL_USE_MPG123
+	AudioLog4("CStream::Terminate: mpg123_exit");
 	mpg123_exit();
 #endif
 #ifdef MULTITHREADED_AUDIO
+	AudioLog4("CStream::Terminate: stopping audio thread");
 	gAudioThreadQueueMutex.lock();
 	gAudioThreadTerm = true;
 	gAudioThreadQueueMutex.unlock();
@@ -1216,6 +1252,7 @@ void CStream::Terminate()
 	gAudioThreadCv.notify_one();
 	gAudioThread.join();
 #endif
+	AudioLog4("CStream::Terminate done");
 }
 
 CStream::CStream(ALuint *sources, ALuint (&buffers)[NUM_STREAMBUFFERS]) :

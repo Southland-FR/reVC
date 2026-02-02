@@ -43,6 +43,52 @@
 #endif
 #include "oal/stream.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static FILE *gAudioLog = nil;
+static void
+AudioLog(const char *msg)
+{
+	if(gAudioLog == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gAudioLog = fopen(logPath, "a");
+	}
+	if(gAudioLog == nil)
+		return;
+	fprintf(gAudioLog, "Audio: %s\n", msg);
+	fflush(gAudioLog);
+}
+
+static void
+AudioLogAL(const char *where)
+{
+	ALenum err = alGetError();
+	if(err != AL_NO_ERROR){
+		char buf[128];
+		sprintf(buf, "OAL: alGetError at %s = 0x%X", where, (unsigned)err);
+		AudioLog(buf);
+	}
+}
+
+static void
+AudioLogALC(const char *where, ALCdevice *dev)
+{
+	ALCenum err = alcGetError(dev);
+	if(err != ALC_NO_ERROR){
+		char buf[128];
+		sprintf(buf, "OAL: alcGetError at %s = 0x%X", where, (unsigned)err);
+		AudioLog(buf);
+	}
+}
+
 #include "AudioManager.h"
 #include "MusicManager.h"
 #include "Frontend.h"
@@ -766,12 +812,18 @@ cSampleManager::Initialise(void)
 	if ( _bSampmanInitialised )
 		return TRUE;
 
-	EFXInit();
+	AudioLog("OAL: Initialise begin");
+	{
+		char buf[256];
+		sprintf(buf, "OAL: SampleBankDesc=%s SampleBankData=%s", SampleBankDescFilename, SampleBankDataFilename);
+		AudioLog(buf);
+	}
 
 	for(int i = 0; i < MAX_STREAMS; i++)
 		aStream[i] = new CStream(ALStreamSources[i], ALStreamBuffers[i]);
 
 	CStream::Initialise();
+	AudioLog("OAL: CStream::Initialise done");
 
 	{
 		for ( int32 i = 0; i < TOTAL_AUDIO_SAMPLES; i++ )
@@ -836,30 +888,84 @@ cSampleManager::Initialise(void)
 	}
 
 	add_providers();
+	{
+		char buf[128];
+		sprintf(buf, "OAL: providers[0]=%s sources=%d", providers[0].name, providers[0].sources);
+		AudioLog(buf);
+	}
+	{
+		char buf[128];
+		sprintf(buf, "OAL: defaultProvider=%d curprovider=%d prevprovider=%d", defaultProvider, curprovider, prevprovider);
+		AudioLog(buf);
+	}
 
 	{
 		int index = 0;
 		_maxSamples = Min(MAXCHANNELS, providers[index].sources);
+		{
+			char buf[128];
+			sprintf(buf, "OAL: maxSamples=%u", (unsigned)_maxSamples);
+			AudioLog(buf);
+		}
 		
 		ALCint attr[] = {ALC_FREQUENCY,MAX_FREQ,
 						ALC_MONO_SOURCES, MAX_DIGITAL_MIXER_CHANNELS - MAX2DCHANNELS,
 						ALC_STEREO_SOURCES, MAX2DCHANNELS,
 						0,
 						};
+		{
+			char buf[256];
+			sprintf(buf, "OAL: attr freq=%d mono=%d stereo=%d", MAX_FREQ, MAX_DIGITAL_MIXER_CHANNELS - MAX2DCHANNELS, MAX2DCHANNELS);
+			AudioLog(buf);
+		}
 		
 		ALDevice  = alcOpenDevice(providers[index].id);
-		ASSERT(ALDevice != NULL);
+		if(ALDevice == NULL){
+			AudioLog("OAL: alcOpenDevice failed");
+			return FALSE;
+		}
+		AudioLogALC("alcOpenDevice", ALDevice);
+		{
+			const ALCchar *devName = alcGetString(ALDevice, ALC_DEVICE_SPECIFIER);
+			if(devName){
+				char buf[256];
+				sprintf(buf, "OAL: device=%s", devName);
+				AudioLog(buf);
+			}
+		}
 		
 		ALContext = alcCreateContext(ALDevice, attr);
-		ASSERT(ALContext != NULL);
+		if(ALContext == NULL){
+			AudioLog("OAL: alcCreateContext failed");
+			return FALSE;
+		}
+		AudioLogALC("alcCreateContext", ALDevice);
 		
 		alcMakeContextCurrent(ALContext);
+		AudioLog("OAL: context current");
+		AudioLogALC("alcMakeContextCurrent", ALDevice);
+		{
+			const char *vendor = (const char*)alGetString(AL_VENDOR);
+			const char *renderer = (const char*)alGetString(AL_RENDERER);
+			const char *version = (const char*)alGetString(AL_VERSION);
+			char buf[512];
+			sprintf(buf, "OAL: vendor=%s renderer=%s version=%s", vendor ? vendor : "(null)", renderer ? renderer : "(null)", version ? version : "(null)");
+			AudioLog(buf);
+		}
 	
 		const char* ext=(const char*)alGetString(AL_EXTENSIONS);
+		{
+			char buf[64];
+			sprintf(buf, "OAL: extensions ptr=%p", ext);
+			AudioLog(buf);
+		}
 		if ( strstr(ext,"AL_SOFT_loop_points")==NULL )
 		{
 			debug("OpenAL missing AL_SOFT_loop_points; continuing without loop point support\n");
+			AudioLog("OAL: missing AL_SOFT_loop_points");
 		}
+		EFXInit();
+		AudioLog("OAL: EFXInit done");
 		
 		alListenerf (AL_GAIN,     1.0f);
 		alListener3f(AL_POSITION, 0.0f, 0.0f, 0.0f);
@@ -868,15 +974,23 @@ cSampleManager::Initialise(void)
 		alListenerfv(AL_ORIENTATION, orientation);
 		
 		alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
+		AudioLogAL("listener setup");
 		
 		if ( alcIsExtensionPresent(ALDevice, (ALCchar*)ALC_EXT_EFX_NAME) )
 		{ 
-			_effectsSupported = providers[index].bSupportsFx;
-			alGenAuxiliaryEffectSlots(1, &ALEffectSlot);
-			alGenEffects(1, &ALEffect);
+			if (alGenAuxiliaryEffectSlots && alGenEffects) {
+				_effectsSupported = providers[index].bSupportsFx;
+				alGenAuxiliaryEffectSlots(1, &ALEffectSlot);
+				alGenEffects(1, &ALEffect);
+				AudioLogAL("EFX gen");
+			} else {
+				_effectsSupported = false;
+				AudioLog("OAL: EFX functions missing, skipping EFX setup");
+			}
 		}
 
 		alGenSources(MAX_STREAMS*2, ALStreamSources[0]);
+		AudioLogAL("alGenSources");
 		for ( int32 i = 0; i < MAX_STREAMS; i++ )
 		{
 			alGenBuffers(NUM_STREAMBUFFERS, ALStreamBuffers[i]);
@@ -886,9 +1000,11 @@ cSampleManager::Initialise(void)
 			alSourcei(ALStreamSources[i][1], AL_SOURCE_RELATIVE, AL_TRUE);
 			alSource3f(ALStreamSources[i][1], AL_POSITION, 0.0f, 0.0f, 0.0f);
 			alSourcef(ALStreamSources[i][1], AL_GAIN, 1.0f);
+			AudioLogAL("stream sources setup");
 		} 
 		
 		CChannel::InitChannels();
+		AudioLog("OAL: CChannel::InitChannels done");
 
 		for ( int32 i = 0; i < MAXCHANNELS; i++ )
 			aChannel[i].Init(i);
@@ -900,6 +1016,7 @@ cSampleManager::Initialise(void)
 			/**/
 			alAuxiliaryEffectSloti(ALEffectSlot, AL_EFFECTSLOT_EFFECT, ALEffect);
 			/**/
+			AudioLogAL("EFX slot");
 			
 			for ( int32 i = 0; i < MAXCHANNELS; i++ )
 				aChannel[i].SetReverbMix(ALEffectSlot, 0.0f);
@@ -915,11 +1032,13 @@ cSampleManager::Initialise(void)
 	FILE *cacheFile = fcaseopen("audio\\sound.cache", "rb");
 	if (cacheFile) {
 		debug("Loadind audio cache (If game crashes around here, then your cache is corrupted, remove audio/sound.cache)\n");
+		AudioLog("OAL: audio cache found");
 		fread(nStreamLength, sizeof(uint32), TOTAL_STREAMED_SOUNDS, cacheFile);
 		fclose(cacheFile);
 	} else
 	{
 		debug("Cannot load audio cache\n");
+		AudioLog("OAL: audio cache missing");
 #endif
 
 		for ( int32 i = 0; i < TOTAL_STREAMED_SOUNDS; i++ )
@@ -934,27 +1053,50 @@ cSampleManager::Initialise(void)
 				aStream[0]->Close();
 				
 				nStreamLength[i] = tatalms;
-			} else
+			} else {
+				char buf[128];
+				sprintf(buf, "OAL: stream open failed index=%d", i);
+				AudioLog(buf);
 				USERERROR("Can't open '%s'\n", StreamedNameTable[i]);
+			}
 		}
 #ifdef AUDIO_CACHE
 		cacheFile = fcaseopen("audio\\sound.cache", "wb");
 		if(cacheFile) {
 			debug("Saving audio cache\n");
+			AudioLog("OAL: audio cache saving");
 			fwrite(nStreamLength, sizeof(uint32), TOTAL_STREAMED_SOUNDS, cacheFile);
 			fclose(cacheFile);
 		} else {
 			debug("Cannot save audio cache\n");
+			AudioLog("OAL: audio cache save failed");
 		}
 	}
 #endif
 
 	{
+		{
+			char buf[256];
+			WIN32_FILE_ATTRIBUTE_DATA fad;
+			BOOL okDesc = GetFileAttributesExA(SampleBankDescFilename, GetFileExInfoStandard, &fad);
+			unsigned long long szDesc = 0;
+			if(okDesc)
+				szDesc = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+			BOOL okData = GetFileAttributesExA(SampleBankDataFilename, GetFileExInfoStandard, &fad);
+			unsigned long long szData = 0;
+			if(okData)
+				szData = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+			sprintf(buf, "OAL: sfx desc exists=%d size=%llu data exists=%d size=%llu", okDesc != FALSE, szDesc, okData != FALSE, szData);
+			AudioLog(buf);
+		}
+		AudioLog("OAL: InitialiseSampleBanks begin");
 		if ( !InitialiseSampleBanks() )
 		{
+			AudioLog("OAL: InitialiseSampleBanks failed");
 			Terminate();
 			return FALSE;
 		}
+		AudioLog("OAL: InitialiseSampleBanks ok");
 		
 		nSampleBankMemoryStartAddress[SFX_BANK_0] = (uintptr)malloc(nSampleBankSize[SFX_BANK_0]);
 		ASSERT(nSampleBankMemoryStartAddress[SFX_BANK_0] != 0);
@@ -981,6 +1123,7 @@ cSampleManager::Initialise(void)
 #endif
 
 		LoadSampleBank(SFX_BANK_0);
+		AudioLog("OAL: LoadSampleBank SFX_BANK_0 ok");
 	}
 	
 	{
@@ -995,13 +1138,17 @@ cSampleManager::Initialise(void)
 
 	{
 		_bSampmanInitialised = TRUE;
+		AudioLog("OAL: Initialise ok");
 		
 		if ( defaultProvider >= 0 && defaultProvider < m_nNumberOfProviders )
 		{
+			AudioLog("OAL: set_new_provider begin");
 			set_new_provider(defaultProvider);
+			AudioLog("OAL: set_new_provider ok");
 		}
 		else
 		{
+			AudioLog("OAL: defaultProvider out of range");
 			Terminate();
 			return FALSE;
 		}

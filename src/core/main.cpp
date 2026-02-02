@@ -19,6 +19,7 @@
 #include "Clouds.h"
 #include "Draw.h"
 #include "Sprite2d.h"
+#include "FileLoader.h"
 #include "Renderer.h"
 #include "Coronas.h"
 #include "WaterLevel.h"
@@ -87,6 +88,13 @@ extern int gRevcBackBufferHeight;
 
 static FILE *gRevcCoreLog = nil;
 static uint32 gRevcFrameLogCount = 0;
+// SA overlay (tvcorn) disabled for now
+#if 0
+static RwTexDictionary *gSaOverlayTxd = nil;
+static RwTexture *gSaTvCornTex = nil;
+static bool gSaOverlayLoaded = false;
+static int gSaOverlayTexDumped = 0;
+#endif
 static void RevcLogCore(const char *msg)
 {
 	if(gRevcCoreLog == nil){
@@ -103,6 +111,116 @@ static void RevcLogCore(const char *msg)
 		return;
 	fprintf(gRevcCoreLog, "Core: %s\n", msg);
 	fflush(gRevcCoreLog);
+}
+
+static void
+LoadSaOverlayTexture(void)
+{
+#if 0
+	if(gSaOverlayLoaded)
+		return;
+	gSaOverlayLoaded = true;
+
+	char exePath[MAX_PATH];
+	GetModuleFileNameA(nil, exePath, MAX_PATH);
+	char *slash = strrchr(exePath, '\\');
+	if(slash) *(slash + 1) = '\0';
+	char txdPath[MAX_PATH];
+	strcpy(txdPath, exePath);
+	strcat(txdPath, "models\\txd\\LD_SPAC_VC.txd");
+	{
+		char buf[256];
+		WIN32_FILE_ATTRIBUTE_DATA fad;
+		BOOL ok = GetFileAttributesExA(txdPath, GetFileExInfoStandard, &fad);
+		unsigned long long sz = 0;
+		if(ok)
+			sz = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+		sprintf(buf, "Overlay: loading txd path=%s", txdPath);
+		RevcLogCore(buf);
+		sprintf(buf, "Overlay: txd exists=%d size=%llu", ok != FALSE, sz);
+		RevcLogCore(buf);
+	}
+
+	gSaOverlayTxd = CFileLoader::LoadTexDictionary(txdPath);
+	if(gSaOverlayTxd){
+		RevcLogCore("Overlay: txd loaded");
+		RwTexDictionary *prevTxd = RwTexDictionaryGetCurrent();
+		RwTexDictionarySetCurrent(gSaOverlayTxd);
+		gSaTvCornTex = RwTexDictionaryFindNamedTexture(gSaOverlayTxd, "tvcorn");
+		if(gSaTvCornTex == nil)
+			gSaTvCornTex = RwTexDictionaryFindNamedTexture(gSaOverlayTxd, "TVCORN");
+		RwTexDictionarySetCurrent(prevTxd);
+		if(gSaTvCornTex){
+			RwTextureSetAddressing(gSaTvCornTex, rwTEXTUREADDRESSCLAMP);
+			RwTextureSetFilterMode(gSaTvCornTex, rwFILTERLINEAR);
+			RevcLogCore("Overlay: tvcorn loaded");
+		}else{
+			RevcLogCore("Overlay: tvcorn not found in LD_SPAC.txd");
+			if(!gSaOverlayTexDumped){
+				gSaOverlayTexDumped = 1;
+				struct DumpCtx { int count; };
+				DumpCtx ctx = {0};
+				auto cb = [](RwTexture *tex, void *data) -> RwTexture* {
+					DumpCtx *c = (DumpCtx*)data;
+					char b[128];
+					sprintf(b, "Overlay: txd tex[%d]=%s", c->count, tex->name);
+					RevcLogCore(b);
+					c->count++;
+					return tex;
+				};
+				RwTexDictionaryForAllTextures(gSaOverlayTxd, cb, &ctx);
+				char b[128];
+				sprintf(b, "Overlay: txd texture count=%d", ctx.count);
+				RevcLogCore(b);
+			}
+		}
+	}else{
+		RevcLogCore("Overlay: failed to load LD_SPAC.txd");
+	}
+
+	if(!gSaTvCornTex)
+		RevcLogCore("Overlay: tvcorn not available (TXD only)");
+#endif
+}
+
+static void
+DrawSaOverlayCorners(void)
+{
+#if 0
+	char buf[128];
+	sprintf(buf, "Overlay: draw begin tex=%p", gSaTvCornTex);
+	RevcLogCore(buf);
+	if(!gSaTvCornTex)
+		return;
+	RwRaster *ras = RwTextureGetRaster(gSaTvCornTex);
+	sprintf(buf, "Overlay: raster=%p", ras);
+	RevcLogCore(buf);
+	if(!ras)
+		return;
+
+	float w = (float)RwRasterGetWidth(ras);
+	float h = (float)RwRasterGetHeight(ras);
+	sprintf(buf, "Overlay: size %.0f x %.0f", w, h);
+	RevcLogCore(buf);
+	if(w <= 0.0f || h <= 0.0f)
+		return;
+
+	float screenW = (float)RsGlobal.maximumWidth;
+	float screenH = (float)RsGlobal.maximumHeight;
+
+	CSprite2d spr;
+	spr.m_pTexture = gSaTvCornTex;
+	const CRGBA col(255, 255, 255, 255);
+
+	// top-left
+	spr.Draw(CRect(0.0f, 0.0f, w, h), col, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+	// top-right (flip U)
+	spr.Draw(CRect(screenW - w, 0.0f, screenW, h), col, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f);
+	// bottom-left (flip V)
+	spr.Draw(CRect(0.0f, screenH - h, w, screenH), col, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f);
+	// bottom-right (flip U+V)
+	spr.Draw(CRect(screenW - w, screenH - h, screenW, screenH), col, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+#endif
 }
 
 GlobalScene Scene;
@@ -1857,6 +1975,7 @@ Idle(void *arg)
 	tbEndTimer("Render2dStuff-Fade");
 	RevcLogCore("Idle: after Render2dStuffAfterFade");
 #ifdef REVC_DLL
+	// SA overlay disabled for now
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
 	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)FALSE);
 	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);

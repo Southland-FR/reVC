@@ -12,6 +12,29 @@
 #include "World.h"
 #include "ZoneCull.h"
 #include "debugmenu.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static FILE *gAudioLog3 = nil;
+static void
+AudioLog3(const char *msg)
+{
+	if(gAudioLog3 == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gAudioLog3 = fopen(logPath, "a");
+	}
+	if(gAudioLog3 == nil)
+		return;
+	fprintf(gAudioLog3, "Audio: %s\n", msg);
+	fflush(gAudioLog3);
+}
 
 #ifdef DEBUGMENU
 SETTWEAKPATH("Audio");
@@ -65,12 +88,16 @@ void
 cAudioManager::Initialise()
 {
 	if (!m_bIsInitialised) {
+		AudioLog3("AudioManager::Initialise begin");
 		PreInitialiseGameSpecificSetup();
+		AudioLog3("AudioManager::Initialise after PreInitialiseGameSpecificSetup");
 		m_bIsInitialised = SampleManager.Initialise();
+		AudioLog3(m_bIsInitialised ? "AudioManager::Initialise SampleManager ok" : "AudioManager::Initialise SampleManager failed");
 		if (m_bIsInitialised) {
 #ifdef EXTERNAL_3D_SOUND
 			m_nActiveSamples = SampleManager.GetMaximumSupportedChannels();
 			if (m_nActiveSamples <= 1) {
+				AudioLog3("AudioManager::Initialise too few channels, terminating");
 				Terminate();
 			} else {
 				m_nActiveSamples--;
@@ -79,11 +106,16 @@ cAudioManager::Initialise()
 				m_nActiveSamples = NUM_CHANNELS_GENERIC;
 #endif
 				PostInitialiseGameSpecificSetup();
+				AudioLog3("AudioManager::Initialise after PostInitialiseGameSpecificSetup");
 				InitialisePoliceRadioZones();
+				AudioLog3("AudioManager::Initialise after InitialisePoliceRadioZones");
 				InitialisePoliceRadio();
+				AudioLog3("AudioManager::Initialise after InitialisePoliceRadio");
 				MusicManager.Initialise();
+				AudioLog3("AudioManager::Initialise after MusicManager::Initialise");
 			}
 		}
+		AudioLog3(m_bIsInitialised ? "AudioManager::Initialise ok" : "AudioManager::Initialise failed");
 	}
 }
 
@@ -91,7 +123,9 @@ void
 cAudioManager::Terminate()
 {
 	if (m_bIsInitialised) {
+		AudioLog3("AudioManager::Terminate begin");
 		MusicManager.Terminate();
+		AudioLog3("AudioManager::Terminate after MusicManager::Terminate");
 
 		for (uint32 i = 0; i < NUM_AUDIOENTITIES; i++) {
 			m_asAudioEntities[i].m_bIsUsed = FALSE;
@@ -108,9 +142,11 @@ cAudioManager::Terminate()
 		}
 
 		SampleManager.Terminate();
+		AudioLog3("AudioManager::Terminate after SampleManager::Terminate");
 
 		m_bIsInitialised = FALSE;
 		PostTerminateGameSpecificShutdown();
+		AudioLog3("AudioManager::Terminate end");
 	}
 }
 

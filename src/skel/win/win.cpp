@@ -74,6 +74,7 @@ static char gRevcPrevCwd[MAX_PATH];
 
 static FILE *gRevcLog = nil;
 static const char *gRevcBuildId = "revc_in_sa build " __DATE__ " " __TIME__;
+bool gRevcAudioOk = false;
 static IDirect3DDevice9 *gRevcD3DDevice = nil;
 static IDirect3D9 *gRevcD3D9 = nil;
 static HWND gRevcHwnd = nil;
@@ -1027,6 +1028,18 @@ extern "C" __declspec(dllexport) void
 ReVC_Shutdown()
 {
 	RevcLog("ReVC_Shutdown: begin");
+	__try {
+		extern bool gRevcAudioOk;
+		if(gRevcAudioOk){
+			DMAudio.Terminate();
+			RevcLog("ReVC_Shutdown: DMAudio.Terminate ok");
+			gRevcAudioOk = false;
+		} else {
+			RevcLog("ReVC_Shutdown: DMAudio.Terminate skipped (audio not ok)");
+		}
+	} __except(RevcSehFilter("ReVC_Shutdown: exception in DMAudio.Terminate", GetExceptionInformation())) {
+		RevcLog("ReVC_Shutdown: DMAudio.Terminate SEH");
+	}
 	if (gRevcInputInitialized) {
 		__try {
 			_InputShutdown();

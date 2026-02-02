@@ -38,6 +38,10 @@
 #include "Hud.h"
 #include "IniFile.h"
 #include "Lights.h"
+
+#ifdef REVC_DLL
+extern bool gRevcAudioOk;
+#endif
 #include "MBlur.h"
 #include "Messages.h"
 #include "MemoryCard.h"
@@ -369,37 +373,59 @@ bool CGame::InitialiseOnceAfterRW(void)
 #ifdef GTA_PS2
 	LoadingScreen("Loading the Game", "Initialising audio", GetRandomSplashScreen());
 #endif
+	bool audioOk = false;
 #ifdef REVC_DLL
-	RevcLogGame("InitAfterRW", "skipping DMAudio::Initialise (REVC_DLL)");
+	extern bool gRevcAudioOk;
+	gRevcAudioOk = false;
+#endif
+#ifdef REVC_DLL
+	__try {
+		DMAudio.Initialise();
+		audioOk = true;
+		RevcLogGame("InitAfterRW", "after DMAudio::Initialise");
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		RevcLogGame("InitAfterRW", "DMAudio::Initialise SEH (audio disabled)");
+		audioOk = false;
+	}
 #else
 	DMAudio.Initialise();
+	audioOk = true;
 	RevcLogGame("InitAfterRW", "after DMAudio::Initialise");
+#endif
+#ifdef REVC_DLL
+	gRevcAudioOk = audioOk;
+#endif
 
 #ifndef GTA_PS2
 #ifdef EXTERNAL_3D_SOUND
-	if ( DMAudio.GetNum3DProvidersAvailable() == 0 )
+	if ( audioOk && DMAudio.GetNum3DProvidersAvailable() == 0 )
 		FrontEndMenuManager.m_nPrefsAudio3DProviderIndex = NO_AUDIO_PROVIDER;
 
-	if ( FrontEndMenuManager.m_nPrefsAudio3DProviderIndex == AUDIO_PROVIDER_NOT_DETERMINED || FrontEndMenuManager.m_nPrefsAudio3DProviderIndex == -2 )
+	if ( audioOk && (FrontEndMenuManager.m_nPrefsAudio3DProviderIndex == AUDIO_PROVIDER_NOT_DETERMINED || FrontEndMenuManager.m_nPrefsAudio3DProviderIndex == -2) )
 	{
 		FrontEndMenuManager.m_PrefsSpeakers = 0;
 		FrontEndMenuManager.m_nPrefsAudio3DProviderIndex = DMAudio.AutoDetect3DProviders();
 	}
 
-	DMAudio.SetCurrent3DProvider(FrontEndMenuManager.m_nPrefsAudio3DProviderIndex);
-	DMAudio.SetSpeakerConfig(FrontEndMenuManager.m_PrefsSpeakers);
+	if(audioOk){
+		DMAudio.SetCurrent3DProvider(FrontEndMenuManager.m_nPrefsAudio3DProviderIndex);
+		DMAudio.SetSpeakerConfig(FrontEndMenuManager.m_PrefsSpeakers);
+	}
 #endif
-	DMAudio.SetDynamicAcousticModelingStatus(FrontEndMenuManager.m_PrefsDMA);
-	RevcLogGame("InitAfterRW", "after DMAudio::SetDynamicAcousticModelingStatus");
-	DMAudio.SetMusicMasterVolume(FrontEndMenuManager.m_PrefsMusicVolume);
-	RevcLogGame("InitAfterRW", "after DMAudio::SetMusicMasterVolume");
-	DMAudio.SetEffectsMasterVolume(FrontEndMenuManager.m_PrefsSfxVolume);
-	RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsMasterVolume");
-	DMAudio.SetEffectsFadeVol(127);
-	RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsFadeVol");
-	DMAudio.SetMusicFadeVol(127);
-	RevcLogGame("InitAfterRW", "after DMAudio::SetMusicFadeVol");
-#endif
+	if(audioOk){
+		DMAudio.SetDynamicAcousticModelingStatus(FrontEndMenuManager.m_PrefsDMA);
+		RevcLogGame("InitAfterRW", "after DMAudio::SetDynamicAcousticModelingStatus");
+		DMAudio.SetMusicMasterVolume(FrontEndMenuManager.m_PrefsMusicVolume);
+		RevcLogGame("InitAfterRW", "after DMAudio::SetMusicMasterVolume");
+		DMAudio.SetEffectsMasterVolume(FrontEndMenuManager.m_PrefsSfxVolume);
+		RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsMasterVolume");
+		DMAudio.SetEffectsFadeVol(127);
+		RevcLogGame("InitAfterRW", "after DMAudio::SetEffectsFadeVol");
+		DMAudio.SetMusicFadeVol(127);
+		RevcLogGame("InitAfterRW", "after DMAudio::SetMusicFadeVol");
+	}else{
+		RevcLogGame("InitAfterRW", "DMAudio init failed; skipping audio setup");
+	}
 #endif
 	RevcLogGame("InitAfterRW", "end");
 	return true;

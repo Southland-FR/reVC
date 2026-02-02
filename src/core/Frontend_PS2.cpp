@@ -1727,6 +1727,14 @@ CMenuManager::DrawFrontEndNormal(void)
 	CFont::DrawFonts();
 
 	pActiveMenuPage = nil;
+#ifdef REVC_DLL
+	extern bool gRevcAudioOk;
+	if(m_currentPage == PAGE_AUDIO && !gRevcAudioOk)
+		m_currentPage = PAGE_DISPLAY;
+#else
+	if(m_currentPage == PAGE_AUDIO && !DMAudio.IsAudioInitialised())
+		m_currentPage = PAGE_DISPLAY;
+#endif
 	switch(m_currentPage)
 	{
 		case PAGE_STATS:	pActiveMenuPage = &MenuPage_Stats; break;

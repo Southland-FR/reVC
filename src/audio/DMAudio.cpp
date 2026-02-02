@@ -5,13 +5,38 @@
 #include "AudioManager.h"
 #include "AudioScriptObject.h"
 #include "sampman.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static FILE *gAudioLog2 = nil;
+static void
+AudioLog2(const char *msg)
+{
+	if(gAudioLog2 == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gAudioLog2 = fopen(logPath, "a");
+	}
+	if(gAudioLog2 == nil)
+		return;
+	fprintf(gAudioLog2, "Audio: %s\n", msg);
+	fflush(gAudioLog2);
+}
 
 cDMAudio DMAudio;
 
 void
 cDMAudio::Initialise(void)
 {
+	AudioLog2("DMAudio::Initialise begin");
 	AudioManager.Initialise();
+	AudioLog2(AudioManager.m_bIsInitialised ? "DMAudio::Initialise ok" : "DMAudio::Initialise failed");
 }
 
 void
