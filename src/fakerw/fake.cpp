@@ -459,7 +459,7 @@ RwBool RwRenderStateGet(RwRenderState state, void *value)
 	case rwRENDERSTATETEXTUREADDRESSV: *uival = GetRenderState(TEXTUREADDRESSV); return true;
 	case rwRENDERSTATETEXTUREPERSPECTIVE: *uival = 1; return true;
 	case rwRENDERSTATEZTESTENABLE: *uival = GetRenderState(ZTESTENABLE); return true;
-	case rwRENDERSTATESHADEMODE: *uival = rwSHADEMODEGOURAUD; return true;
+	case rwRENDERSTATESHADEMODE: *uival = GetRenderState(SHADEMODE); return true;
 	case rwRENDERSTATEZWRITEENABLE: *uival = GetRenderState(ZWRITEENABLE); return true;
 	case rwRENDERSTATETEXTUREFILTER: *uival = GetRenderState(TEXTUREFILTER); return true;
 	case rwRENDERSTATESRCBLEND: *uival = GetRenderState(SRCBLEND); return true;
@@ -506,7 +506,7 @@ RwBool RwRenderStateSet(RwRenderState state, void *value)
 	case rwRENDERSTATETEXTUREADDRESSV: SetRenderState(TEXTUREADDRESSV, uival); return true;
 	case rwRENDERSTATETEXTUREPERSPECTIVE: return true;
 	case rwRENDERSTATEZTESTENABLE: SetRenderState(ZTESTENABLE, uival); return true;
-	case rwRENDERSTATESHADEMODE: return true;
+	case rwRENDERSTATESHADEMODE: SetRenderState(SHADEMODE, uival); return true;
 	case rwRENDERSTATEZWRITEENABLE: SetRenderState(ZWRITEENABLE, uival); return true;
 	case rwRENDERSTATETEXTUREFILTER: SetRenderState(TEXTUREFILTER, uival); return true;
 	case rwRENDERSTATESRCBLEND: SetRenderState(SRCBLEND, uival); return true;

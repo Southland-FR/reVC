@@ -52,6 +52,7 @@
 #include "skeleton.h"
 #include "platform.h"
 #include "crossplatform.h"
+#include "GenericGameStorage.h"
 
 #define MAX_SUBSYSTEMS		(16)
 
@@ -890,7 +891,7 @@ ReVC_Run()
 {
 	MSG message;
 	RwInitialised = TRUE;
-	gGameState = GS_INIT_PLAYING_GAME;
+	gGameState = GS_INIT_FRONTEND;
 	RevcLog("ReVC_Run: begin");
 	RevcLog("ReVC_Run: %s", gRevcBuildId);
 	RevcLog("ReVC_Run: state quit=%d exit=%d gameState=%d", RsGlobal.quit, gRevcExitRequested, gGameState);
@@ -929,6 +930,45 @@ ReVC_Run()
 		{
 			switch(gGameState)
 			{
+				case GS_INIT_FRONTEND:
+					RevcLog("ReVC_Run: GS_INIT_FRONTEND");
+					LoadingScreen(nil, nil, "loadsc0");
+					FrontEndMenuManager.m_bGameNotLoaded = true;
+					FrontEndMenuManager.m_bStartUpFrontEndRequested = true;
+					if (defaultFullscreenRes)
+					{
+						defaultFullscreenRes = FALSE;
+						FrontEndMenuManager.m_nPrefsVideoMode = GcurSelVM;
+						FrontEndMenuManager.m_nDisplayVideoMode = GcurSelVM;
+					}
+					gGameState = GS_FRONTEND;
+					TRACE("gGameState = GS_FRONTEND;");
+					break;
+
+				case GS_FRONTEND:
+				{
+					WINDOWPLACEMENT wp;
+					wp.length = sizeof(WINDOWPLACEMENT);
+					GetWindowPlacement(PSGLOBAL(window), &wp);
+					if (wp.showCmd != SW_SHOWMINIMIZED)
+						RsEventHandler(rsFRONTENDIDLE, nil);
+
+					if ( !FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bWantToLoad )
+					{
+						gGameState = GS_INIT_PLAYING_GAME;
+						TRACE("gGameState = GS_INIT_PLAYING_GAME;");
+					}
+
+					if ( FrontEndMenuManager.m_bWantToLoad )
+					{
+						InitialiseGame();
+						FrontEndMenuManager.m_bGameNotLoaded = false;
+						gGameState = GS_PLAYING_GAME;
+						TRACE("gGameState = GS_PLAYING_GAME;");
+					}
+					break;
+				}
+
 				case GS_INIT_PLAYING_GAME:
 					RevcLog("ReVC_Run: GS_INIT_PLAYING_GAME");
 					__try {
@@ -982,13 +1022,16 @@ ReVC_Run()
 								RevcLog("ReVC_Run: size fix SEH");
 							}
 						}
-						RevcLog("ReVC_Run: calling CGame::Initialise (maxW=%d maxH=%d)", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
-						CGame::Initialise("DATA\\GTA_VC.DAT");
+						RevcLog("ReVC_Run: calling InitialiseGame (maxW=%d maxH=%d)", RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+						InitialiseGame();
 						gRevcGameInitialized = TRUE;
-					} __except(RevcSehFilter("ReVC_Run: exception in CGame::Initialise", GetExceptionInformation())) {
+					} __except(RevcSehFilter("ReVC_Run: exception in InitialiseGame", GetExceptionInformation())) {
 						gRevcExitRequested = TRUE;
 						break;
 					}
+					FrontEndMenuManager.m_bWantToRestart = false;
+					FrontEndMenuManager.m_bWantToLoad = false;
+					b_FoundRecentSavedGameWantToLoad = false;
 					FrontEndMenuManager.m_bGameNotLoaded = false;
 					gGameState = GS_PLAYING_GAME;
 					TRACE("gGameState = GS_PLAYING_GAME;");
@@ -1011,7 +1054,7 @@ ReVC_Run()
 					break;
 				}
 				default:
-					gGameState = GS_INIT_PLAYING_GAME;
+					gGameState = GS_INIT_FRONTEND;
 					break;
 			}
 		}

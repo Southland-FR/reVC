@@ -49,6 +49,8 @@ CTxdStore::AddTxdSlot(const char *name)
 void
 CTxdStore::RemoveTxdSlot(int slot)
 {
+	if(slot < 0)
+		return;
 	TxdDef *def = GetSlot(slot);
 	if(def->texDict)
 		RwTexDictionaryDestroy(def->texDict);
@@ -70,6 +72,8 @@ CTxdStore::FindTxdSlot(const char *name)
 char*
 CTxdStore::GetTxdName(int slot)
 {
+	if(slot < 0)
+		return nil;
 	return GetSlot(slot)->name;
 }
 
@@ -89,30 +93,40 @@ CTxdStore::PopCurrentTxd(void)
 void
 CTxdStore::SetCurrentTxd(int slot)
 {
+	if(slot < 0)
+		return;
 	RwTexDictionarySetCurrent(GetSlot(slot)->texDict);
 }
 
 void
 CTxdStore::Create(int slot)
 {
+	if(slot < 0)
+		return;
 	GetSlot(slot)->texDict = RwTexDictionaryCreate();
 }
 
 int
 CTxdStore::GetNumRefs(int slot)
 {
+	if(slot < 0)
+		return 0;
 	return GetSlot(slot)->refCount;
 }
 
 void
 CTxdStore::AddRef(int slot)
 {
+	if(slot < 0)
+		return;
 	GetSlot(slot)->refCount++;
 }
 
 void
 CTxdStore::RemoveRef(int slot)
 {
+	if(slot < 0)
+		return;
 	if(--GetSlot(slot)->refCount <= 0)
 		CStreaming::RemoveTxd(slot);
 }
@@ -120,12 +134,16 @@ CTxdStore::RemoveRef(int slot)
 void
 CTxdStore::RemoveRefWithoutDelete(int slot)
 {
+	if(slot < 0)
+		return;
 	GetSlot(slot)->refCount--;
 }
 
 bool
 CTxdStore::LoadTxd(int slot, RwStream *stream)
 {
+	if(slot < 0)
+		return false;
 	TxdDef *def = GetSlot(slot);
 
 	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil)){
@@ -139,6 +157,8 @@ CTxdStore::LoadTxd(int slot, RwStream *stream)
 bool
 CTxdStore::LoadTxd(int slot, const char *filename)
 {
+	if(slot < 0)
+		return false;
 	RwStream *stream;
 	bool ret;
 
@@ -157,6 +177,8 @@ CTxdStore::LoadTxd(int slot, const char *filename)
 bool
 CTxdStore::StartLoadTxd(int slot, RwStream *stream)
 {
+	if(slot < 0)
+		return false;
 	TxdDef *def = GetSlot(slot);
 	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil)){
 		def->texDict = RwTexDictionaryGtaStreamRead1(stream);
@@ -170,6 +192,8 @@ CTxdStore::StartLoadTxd(int slot, RwStream *stream)
 bool
 CTxdStore::FinishLoadTxd(int slot, RwStream *stream)
 {
+	if(slot < 0)
+		return false;
 	TxdDef *def = GetSlot(slot);
 	def->texDict = RwTexDictionaryGtaStreamRead2(stream, def->texDict);
 	return def->texDict != nil;
@@ -178,6 +202,8 @@ CTxdStore::FinishLoadTxd(int slot, RwStream *stream)
 void
 CTxdStore::RemoveTxd(int slot)
 {
+	if(slot < 0)
+		return;
 	TxdDef *def = GetSlot(slot);
 	if(def->texDict)
 		RwTexDictionaryDestroy(def->texDict);
