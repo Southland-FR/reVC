@@ -87,6 +87,7 @@ extern int gRevcBackBufferWidth;
 extern int gRevcBackBufferHeight;
 
 static FILE *gRevcCoreLog = nil;
+static bool gRevcLogEnabled = true;
 static uint32 gRevcFrameLogCount = 0;
 // SA overlay (tvcorn) disabled for now
 #if 0
@@ -97,6 +98,8 @@ static int gSaOverlayTexDumped = 0;
 #endif
 static void RevcLogCore(const char *msg)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(gRevcCoreLog == nil){
 		char exePath[MAX_PATH];
 		GetModuleFileNameA(nil, exePath, MAX_PATH);

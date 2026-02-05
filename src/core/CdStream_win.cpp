@@ -6,9 +6,12 @@
 #include "MemoryMgr.h"
 
 static FILE *gCdLog = nil;
+static bool gRevcLogEnabled = true;
 static void
 CdLog(const char *msg)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(gCdLog == nil){
 		char exePath[MAX_PATH];
 		GetModuleFileNameA(nil, exePath, MAX_PATH);

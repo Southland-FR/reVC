@@ -48,9 +48,12 @@
 #endif
 
 static FILE *gAudioLog = nil;
+static bool gRevcLogEnabled = true;
 static void
 AudioLog(const char *msg)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(gAudioLog == nil){
 		char exePath[MAX_PATH];
 		GetModuleFileNameA(nil, exePath, MAX_PATH);

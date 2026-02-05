@@ -74,6 +74,7 @@ static RwBool gRevcGameInitialized = FALSE;
 static char gRevcPrevCwd[MAX_PATH];
 
 static FILE *gRevcLog = nil;
+static bool gRevcLogEnabled = true;
 static const char *gRevcBuildId = "revc_in_sa build " __DATE__ " " __TIME__;
 bool gRevcAudioOk = false;
 static IDirect3DDevice9 *gRevcD3DDevice = nil;
@@ -84,6 +85,8 @@ static RwBool gRevcRwInitialized = FALSE;
 
 static void RevcLog(const char *fmt, ...)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(gRevcLog == nil){
 		char exePath[MAX_PATH];
 		GetModuleFileNameA(nil, exePath, MAX_PATH);
@@ -111,6 +114,8 @@ static void RevcLog(const char *fmt, ...)
 
 static void RevcLogException(const char *tag, EXCEPTION_POINTERS *info)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(!info){
 		RevcLog("%s: exception (no info)", tag);
 		return;
@@ -1036,23 +1041,37 @@ ReVC_Run()
 					gGameState = GS_PLAYING_GAME;
 					TRACE("gGameState = GS_PLAYING_GAME;");
 					break;
-				case GS_PLAYING_GAME:
-				{
-					float ms = (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond();
-					if (RwInitialised)
+					case GS_PLAYING_GAME:
 					{
-						if (!FrontEndMenuManager.m_PrefsFrameLimiter || (1000.0f / (float)RsGlobal.maxFPS) < ms)
+						float ms = (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond();
+						if (RwInitialised)
 						{
-							__try {
-								RsEventHandler(rsIDLE, (void *)TRUE);
-							} __except(RevcSehFilter("ReVC_Run: exception in rsIDLE", GetExceptionInformation())) {
-								gRevcExitRequested = TRUE;
-								break;
+							if (!FrontEndMenuManager.m_PrefsFrameLimiter || (1000.0f / (float)RsGlobal.maxFPS) < ms)
+							{
+								__try {
+									RsEventHandler(rsIDLE, (void *)TRUE);
+								} __except(RevcSehFilter("ReVC_Run: exception in rsIDLE", GetExceptionInformation())) {
+									gRevcExitRequested = TRUE;
+									break;
+								}
 							}
 						}
+						if (FrontEndMenuManager.m_bWantToLoad)
+						{
+							RevcLog("ReVC_Run: want to load, restarting");
+							CPad::ResetCheats();
+							CPad::StopPadsShaking();
+							DMAudio.ChangeMusicMode(MUSICMODE_DISABLE);
+							CGame::ShutDownForRestart();
+							CTimer::Stop();
+							CGame::InitialiseWhenRestarting();
+							DMAudio.ChangeMusicMode(MUSICMODE_GAME);
+							LoadSplash(GetLevelSplashScreen(CGame::currLevel));
+							FrontEndMenuManager.m_bWantToLoad = false;
+							FrontEndMenuManager.m_bWantToRestart = false;
+						}
+						break;
 					}
-					break;
-				}
 				default:
 					gGameState = GS_INIT_FRONTEND;
 					break;

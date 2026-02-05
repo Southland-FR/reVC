@@ -88,8 +88,11 @@ extern bool gRevcAudioOk;
 #include "ZoneCull.h"
 
 static FILE *gRevcGameLog = nil;
+static bool gRevcLogEnabled = true;
 static void RevcLogGame(const char *tag, const char *msg)
 {
+	if(!gRevcLogEnabled)
+		return;
 	if(gRevcGameLog == nil){
 		gRevcGameLog = fopen("revc_in_sa.log", "a");
 	}
@@ -443,6 +446,8 @@ bool CGame::Initialise(const char* datFile)
 {
 	static FILE *gInitLog = nil;
 	auto logStep = [&](const char *msg) {
+		if(!gRevcLogEnabled)
+			return;
 		if(gInitLog == nil){
 			char exePath[MAX_PATH];
 			GetModuleFileNameA(nil, exePath, MAX_PATH);
