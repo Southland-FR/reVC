@@ -1811,7 +1811,13 @@ Idle(void *arg)
 #ifdef PS2_MENU
 		renderGameInMenu = FrontEndMenuManager.m_bRenderGameInMenu ? 1 : 0;
 #else
+#ifdef REVC_DLL
+		// In external-device DLL mode, rendering world behind menu causes
+		// one-frame flashes during menu page transitions.
+		renderGameInMenu = 0;
+#else
 		renderGameInMenu = FrontEndMenuManager.m_bGameNotLoaded ? 0 : 1;
+#endif
 #endif
 		fadeStatus = TheCamera.GetScreenFadeStatus();
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -2277,11 +2283,15 @@ void TheGame(void)
 
 			CRenderer::ConstructRenderList();
 
-	#ifdef PS2_MENU
+#ifdef PS2_MENU
 				if ((!FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bRenderGameInMenu == true) && TheCamera.GetScreenFadeStatus() != FADE_2 )
-	#else
+#else
+#ifdef REVC_DLL
+				if (!FrontEndMenuManager.m_bMenuActive && TheCamera.GetScreenFadeStatus() != FADE_2 )
+#else
 				if ((!FrontEndMenuManager.m_bMenuActive || !FrontEndMenuManager.m_bGameNotLoaded) && TheCamera.GetScreenFadeStatus() != FADE_2 )
-	#endif
+#endif
+#endif
 				{
 				CRenderer::PreRender();
 				// TODO(MIAMI): something ps2all specific
