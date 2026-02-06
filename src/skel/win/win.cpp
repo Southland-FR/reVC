@@ -963,14 +963,6 @@ ReVC_Run()
 						gGameState = GS_INIT_PLAYING_GAME;
 						TRACE("gGameState = GS_INIT_PLAYING_GAME;");
 					}
-
-					if ( FrontEndMenuManager.m_bWantToLoad )
-					{
-						InitialiseGame();
-						FrontEndMenuManager.m_bGameNotLoaded = false;
-						gGameState = GS_PLAYING_GAME;
-						TRACE("gGameState = GS_PLAYING_GAME;");
-					}
 					break;
 				}
 
@@ -1035,7 +1027,8 @@ ReVC_Run()
 						break;
 					}
 					FrontEndMenuManager.m_bWantToRestart = false;
-					FrontEndMenuManager.m_bWantToLoad = false;
+					// Keep m_bWantToLoad so GS_PLAYING_GAME can call
+					// InitialiseWhenRestarting() -> GenericLoad()
 					b_FoundRecentSavedGameWantToLoad = false;
 					FrontEndMenuManager.m_bGameNotLoaded = false;
 					gGameState = GS_PLAYING_GAME;

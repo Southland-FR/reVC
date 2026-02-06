@@ -87,7 +87,7 @@ extern int gRevcBackBufferWidth;
 extern int gRevcBackBufferHeight;
 
 static FILE *gRevcCoreLog = nil;
-static bool gRevcLogEnabled = true;
+static bool gRevcLogEnabled = false;
 static uint32 gRevcFrameLogCount = 0;
 // SA overlay (tvcorn) disabled for now
 #if 0
@@ -284,7 +284,11 @@ bool gbPrintMemoryUsage;
 #ifdef NEW_RENDERER
 bool gbNewRenderer;
 #endif
-#ifdef FIX_BUGS
+#ifdef REVC_DLL
+// SA's depth buffer may not have a stencil component; requesting
+// D3DCLEAR_STENCIL causes the entire Clear to fail (including Z).
+#define CLEARMODE (rwCAMERACLEARZ)
+#elif defined(FIX_BUGS)
 // need to clear stencil for mblur fx. no idea why it works in the original game
 // also for clearing out water rects in new renderer
 #define CLEARMODE (rwCAMERACLEARZ | rwCAMERACLEARSTENCIL)
@@ -387,7 +391,20 @@ bool
 DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomRed, int16 BottomGreen, int16 BottomBlue, int16 Alpha)
 {
 	CDraw::CalculateAspectRatio();
+#ifdef REVC_DLL
+	RwRect rect;
+	RwRect *prect = nil;
+	if(gRevcBackBufferWidth > 0 && gRevcBackBufferHeight > 0){
+		rect.x = 0;
+		rect.y = 0;
+		rect.w = gRevcBackBufferWidth;
+		rect.h = gRevcBackBufferHeight;
+		prect = &rect;
+	}
+	CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#else
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#endif
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
 	RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
 
@@ -1787,21 +1804,28 @@ Idle(void *arg)
 	RevcLogCore("Idle: MEMID_RENDER begin");
 
 	int menuActive = 0;
+	int renderGameInMenu = 0;
 	int fadeStatus = -999;
 	__try {
 		menuActive = FrontEndMenuManager.m_bMenuActive ? 1 : 0;
+#ifdef PS2_MENU
+		renderGameInMenu = FrontEndMenuManager.m_bRenderGameInMenu ? 1 : 0;
+#else
+		renderGameInMenu = FrontEndMenuManager.m_bGameNotLoaded ? 0 : 1;
+#endif
 		fadeStatus = TheCamera.GetScreenFadeStatus();
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		RevcLogCore("Idle: exception reading menu/fade status");
 		goto popret;
 	}
 	{
-		char buf[64];
-		sprintf(buf, "Idle: menuActive=%d fadeStatus=%d", menuActive, fadeStatus);
+		char buf[96];
+		sprintf(buf, "Idle: menuActive=%d renderGameInMenu=%d fadeStatus=%d",
+			menuActive, renderGameInMenu, fadeStatus);
 		RevcLogCore(buf);
 	}
 
-	if(!menuActive && fadeStatus != FADE_2)
+	if((!menuActive || renderGameInMenu) && fadeStatus != FADE_2)
 	{
 		RevcLogCore("Idle: render branch start");
 		// This is from SA, but it's nice for windowed mode
@@ -2023,7 +2047,20 @@ FrontendIdle(void)
 	if(RsGlobal.quit)
 		return;
 
+#ifdef REVC_DLL
+	RwRect rect;
+	RwRect *prect = nil;
+	if(gRevcBackBufferWidth > 0 && gRevcBackBufferHeight > 0){
+		rect.x = 0;
+		rect.y = 0;
+		rect.w = gRevcBackBufferWidth;
+		rect.h = gRevcBackBufferHeight;
+		prect = &rect;
+	}
+	CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#else
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#endif
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
 	RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
 	if(!RsCameraBeginUpdate(Scene.camera))
@@ -2240,8 +2277,12 @@ void TheGame(void)
 
 			CRenderer::ConstructRenderList();
 
-			if ((!FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bRenderGameInMenu == true) && TheCamera.GetScreenFadeStatus() != FADE_2 )
-			{
+	#ifdef PS2_MENU
+				if ((!FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bRenderGameInMenu == true) && TheCamera.GetScreenFadeStatus() != FADE_2 )
+	#else
+				if ((!FrontEndMenuManager.m_bMenuActive || !FrontEndMenuManager.m_bGameNotLoaded) && TheCamera.GetScreenFadeStatus() != FADE_2 )
+	#endif
+				{
 				CRenderer::PreRender();
 				// TODO(MIAMI): something ps2all specific
 
