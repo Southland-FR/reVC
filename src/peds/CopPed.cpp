@@ -20,6 +20,10 @@
 #include "Ropes.h"
 #include "Stinger.h"
 
+#ifdef REVC_DLL
+extern bool RevcPortalBlocksPlayerArrest(void);
+#endif
+
 CCopPed::CCopPed(eCopType copType, int32 modifier) : CPed(PEDTYPE_COP)
 {
 	m_nCopType = copType;
@@ -110,6 +114,10 @@ CCopPed::SetArrestPlayer(CPed *player)
 {
 	if (!IsPedInControl() || !player)
 		return;
+#ifdef REVC_DLL
+	if (player->IsPlayer() && RevcPortalBlocksPlayerArrest())
+		return;
+#endif
 
 	player->Say(SOUND_PED_PLAYER_REACTTOCOP);
 	Say(SOUND_PED_ARREST_COP);
@@ -243,6 +251,12 @@ CCopPed::SetPursuit(bool ignoreCopLimit)
 void
 CCopPed::ArrestPlayer(void)
 {
+#ifdef REVC_DLL
+	if (RevcPortalBlocksPlayerArrest()) {
+		ClearPursuit();
+		return;
+	}
+#endif
 	m_pVehicleAnim = nil;
 	CPed *suspect = (CPed*)m_pSeekTarget;
 	if (suspect) {

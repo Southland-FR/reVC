@@ -114,6 +114,15 @@ int           usingEAX3=0;
 //int         speaker_type=0;
 ALCdevice    *ALDevice = NULL;
 ALCcontext   *ALContext = NULL;
+
+ALCboolean
+SetEngineThreadContext(ALCcontext *context)
+{
+	static PFNALCSETTHREADCONTEXTPROC setThreadContext = NULL;
+	if(setThreadContext == NULL && ALDevice != NULL)
+		setThreadContext = (PFNALCSETTHREADCONTEXTPROC)alcGetProcAddress(ALDevice, "alcSetThreadContext");
+	return setThreadContext ? setThreadContext(context) : alcMakeContextCurrent(context);
+}
 unsigned int _maxSamples;
 float        _fPrevEaxRatioDestination; 
 bool         _effectsSupported = false;
@@ -130,6 +139,20 @@ struct
 }providers[MAXPROVIDERS];
 
 int defaultProvider;
+
+#ifdef REVC_DLL
+// The innermost reVC and its re3 host share OpenAL32.dll. Use a thread-local
+// current context so source and buffer IDs cannot leak between engines.
+extern "C" __declspec(dllexport) RwBool
+ReVC_ActivateAudioContext(RwBool audible)
+{
+	if(ALContext == NULL || SetEngineThreadContext(ALContext) == ALC_FALSE)
+		return FALSE;
+	alGetError();
+	alListenerf(AL_GAIN, audible ? 1.0f : 0.0f);
+	return alGetError() == AL_NO_ERROR;
+}
+#endif
 
 
 char SampleBankDescFilename[] = "audio/sfx.SDT";
@@ -945,6 +968,7 @@ cSampleManager::Initialise(void)
 		AudioLogALC("alcCreateContext", ALDevice);
 		
 		alcMakeContextCurrent(ALContext);
+		SetEngineThreadContext(ALContext);
 		AudioLog("OAL: context current");
 		AudioLogALC("alcMakeContextCurrent", ALDevice);
 		{
@@ -1257,6 +1281,7 @@ cSampleManager::Terminate(void)
 	
 	if ( ALContext )
 	{
+		SetEngineThreadContext(NULL);
 		alcMakeContextCurrent(NULL);
 		alcSuspendContext(ALContext);
 		alcDestroyContext(ALContext);

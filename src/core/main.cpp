@@ -1,6 +1,9 @@
 #include "common.h"
 #ifdef _WIN32
 #include <windows.h>
+#ifdef RW_D3D9
+#include <d3d9.h>
+#endif
 #endif
 #include <time.h>
 #include "rpmatfx.h"
@@ -18,6 +21,7 @@
 #include "RwHelper.h"
 #include "Clouds.h"
 #include "Draw.h"
+#include "Sprite.h"
 #include "Sprite2d.h"
 #include "FileLoader.h"
 #include "Renderer.h"
@@ -34,12 +38,18 @@
 #include "Particle.h"
 #include "Pickups.h"
 #include "WeaponEffects.h"
+#include "Weapon.h"
+#include "ColPoint.h"
+#include "EventList.h"
 #include "PointLights.h"
 #include "Fluff.h"
 #include "Replay.h"
 #include "Camera.h"
 #include "World.h"
 #include "Ped.h"
+#include "PlayerPed.h"
+#include "Wanted.h"
+#include "Streaming.h"
 #include "Font.h"
 #include "Pad.h"
 #include "Hud.h"
@@ -87,8 +97,598 @@ extern int gRevcBackBufferWidth;
 extern int gRevcBackBufferHeight;
 
 static FILE *gRevcCoreLog = nil;
-static bool gRevcLogEnabled = false;
+// Keep a short hosted-frame trace enabled for the portal build. RevcLogCore
+// stops after the first few gameplay frames, so this is useful for diagnosing
+// camera/render-target startup without producing an ever-growing log.
+static bool gRevcLogEnabled = true;
 static uint32 gRevcFrameLogCount = 0;
+
+#if defined(REVC_DLL) && defined(RW_D3D9)
+namespace rw { namespace d3d {
+extern int32 nativeRasterOffset;
+extern IDirect3DDevice9 *d3ddevice;
+} }
+struct RevcD3dRasterExt
+{
+	void *texture;
+	void *palette;
+	void *lockedSurf;
+	uint32 format;
+	uint32 bpp;
+	bool hasAlpha;
+	bool customFormat;
+	bool autogenMipmap;
+};
+#endif
+
+#ifdef REVC_DLL
+extern void ReVC_SetPortalInputEnabled(bool enabled);
+extern bool ReVC_IsPortalInputEnabled(void);
+static void RevcLogPortal(const char *msg);
+
+struct RevcPortalBridgeState
+{
+	bool enabled;
+	bool viewValid;
+	bool preparePending;
+	bool enterPending;
+	bool prepared;
+	bool playerVisibilitySaved;
+	bool savedPlayerVisibility;
+	bool playerProtectionSaved;
+	bool savedBulletProof;
+	bool savedFireProof;
+	bool savedCollisionProof;
+	bool savedMeleeProof;
+	bool savedExplosionProof;
+	bool savedCanBeDamaged;
+	bool entered;
+	bool returnRequested;
+	bool havePreviousReturnDistance;
+	bool returnPlaceKeyDown;
+	CVector position;
+	CVector right;
+	CVector up;
+	CVector forward;
+	float fov;
+	float viewWindowX;
+	float viewWindowY;
+	CVector preparePosition;
+	float prepareHeading;
+	CVector enterPosition;
+	float enterHeading;
+	CVector returnPosition;
+	float returnYaw;
+	float previousReturnDistance;
+	CVector previousReturnSample;
+	uint32 returnCooldownUntil;
+	uint32 playerProtectionUntil;
+	uint32 returnDebugCounter;
+	RwRaster *returnRaster;
+	IDirect3DTexture9 *returnTexture;
+	int32 returnTextureWidth;
+	int32 returnTextureHeight;
+	bool returnTextureCopyLogged;
+	uint32 returnTextureCopyFailures;
+	uint32 traceFrames;
+};
+
+static RevcPortalBridgeState gRevcPortalBridge;
+static void RevcPortalUpdateReturnPortal(void);
+static void RevcPortalRenderReturnPortal(void);
+static float RevcPortalProjectionBaseFov(void);
+static void RevcPortalUpdatePlayerProtection(void);
+
+static bool
+RevcPortalPlayerProtectionActive(void)
+{
+	const uint32 now = CTimer::GetTimeInMilliseconds();
+	const bool graceActive = gRevcPortalBridge.playerProtectionUntil != 0 &&
+		(int32)(gRevcPortalBridge.playerProtectionUntil - now) > 0;
+	return (gRevcPortalBridge.enabled && !gRevcPortalBridge.entered) || graceActive;
+}
+
+// Cop AI must remain live during the preview so wanted levels, pursuits and
+// gunfire stay native. Only the final arrest transition is suppressed while
+// Tommy is the invisible hitscan owner, plus a short grace period after entry.
+bool
+RevcPortalBlocksPlayerArrest(void)
+{
+	return RevcPortalPlayerProtectionActive();
+}
+
+static void
+RevcPortalUpdatePlayerProtection(void)
+{
+	CPlayerPed *player = FindPlayerPed();
+	if(player == nil)
+		return;
+
+	if(RevcPortalPlayerProtectionActive()){
+		if(!gRevcPortalBridge.playerProtectionSaved){
+			gRevcPortalBridge.playerProtectionSaved = true;
+			gRevcPortalBridge.savedBulletProof = player->bBulletProof;
+			gRevcPortalBridge.savedFireProof = player->bFireProof;
+			gRevcPortalBridge.savedCollisionProof = player->bCollisionProof;
+			gRevcPortalBridge.savedMeleeProof = player->bMeleeProof;
+			gRevcPortalBridge.savedExplosionProof = player->bExplosionProof;
+			gRevcPortalBridge.savedCanBeDamaged = player->m_bCanBeDamaged;
+			char buf[160];
+			snprintf(buf, sizeof(buf),
+				"preview player protection armed health=%.1f armour=%.1f wanted=%d",
+				player->m_fHealth, player->m_fArmour,
+				player->m_pWanted ? player->m_pWanted->GetWantedLevel() : -1);
+			RevcLogPortal(buf);
+		}
+		player->bBulletProof = true;
+		player->bFireProof = true;
+		player->bCollisionProof = true;
+		player->bMeleeProof = true;
+		player->bExplosionProof = true;
+		player->m_bCanBeDamaged = false;
+		return;
+	}
+
+	if(gRevcPortalBridge.playerProtectionSaved){
+		player->bBulletProof = gRevcPortalBridge.savedBulletProof;
+		player->bFireProof = gRevcPortalBridge.savedFireProof;
+		player->bCollisionProof = gRevcPortalBridge.savedCollisionProof;
+		player->bMeleeProof = gRevcPortalBridge.savedMeleeProof;
+		player->bExplosionProof = gRevcPortalBridge.savedExplosionProof;
+		player->m_bCanBeDamaged = gRevcPortalBridge.savedCanBeDamaged;
+		gRevcPortalBridge.playerProtectionSaved = false;
+		gRevcPortalBridge.playerProtectionUntil = 0;
+		RevcLogPortal("post-entry player protection released after 2000 ms");
+	}
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_PortalSetView(float px, float py, float pz,
+	float rx, float ry, float rz,
+	float ux, float uy, float uz,
+	float fx, float fy, float fz,
+	float fov, float viewWindowX, float viewWindowY)
+{
+	gRevcPortalBridge.position = CVector(px, py, pz);
+	gRevcPortalBridge.right = CVector(rx, ry, rz);
+	gRevcPortalBridge.up = CVector(ux, uy, uz);
+	gRevcPortalBridge.forward = CVector(fx, fy, fz);
+	gRevcPortalBridge.fov = Clamp(fov, 10.0f, 150.0f);
+	gRevcPortalBridge.viewWindowX = Max(viewWindowX, 0.01f);
+	gRevcPortalBridge.viewWindowY = Max(viewWindowY, 0.01f);
+	gRevcPortalBridge.viewValid = true;
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_PortalPrepare(float x, float y, float z, float heading)
+{
+	CVector position(x, y, z);
+	if(!gRevcPortalBridge.prepared ||
+	   (position - gRevcPortalBridge.preparePosition).MagnitudeSqr() > 0.01f ||
+	   Abs(heading - gRevcPortalBridge.prepareHeading) > 0.001f){
+		gRevcPortalBridge.preparePosition = position;
+		gRevcPortalBridge.prepareHeading = heading;
+		gRevcPortalBridge.preparePending = true;
+		gRevcPortalBridge.prepared = false;
+		gRevcPortalBridge.returnPosition = position;
+		gRevcPortalBridge.returnYaw = heading;
+		gRevcPortalBridge.havePreviousReturnDistance = false;
+	}
+	ReVC_SetPortalInputEnabled(false);
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_PortalSetEnabled(int enabled)
+{
+	gRevcPortalBridge.enabled = enabled != 0;
+	if(gRevcPortalBridge.enabled){
+		gRevcPortalBridge.entered = false;
+		gRevcPortalBridge.havePreviousReturnDistance = false;
+		ReVC_SetPortalInputEnabled(false);
+	}else
+		gRevcPortalBridge.viewValid = false;
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_PortalEnter(float x, float y, float z, float heading)
+{
+	gRevcPortalBridge.enterPosition = CVector(x, y, z);
+	gRevcPortalBridge.enterHeading = heading;
+	gRevcPortalBridge.enterPending = true;
+	gRevcPortalBridge.preparePending = false;
+	gRevcPortalBridge.enabled = false;
+	gRevcPortalBridge.viewValid = false;
+	gRevcPortalBridge.traceFrames = 0;
+	// Cover the host/guest handoff frame as well; the deadline is restarted
+	// when the enter command is actually applied below.
+	gRevcPortalBridge.playerProtectionUntil = CTimer::GetTimeInMilliseconds() + 2000;
+}
+
+static void
+RevcPortalPlacePlayer(CPlayerPed *player, const CVector &position, float heading)
+{
+	player->Teleport(position);
+	player->SetHeading(heading);
+	player->m_fRotationCur = heading;
+	player->m_fRotationDest = heading;
+	player->SetMoveSpeed(0.0f, 0.0f, 0.0f);
+}
+
+static void
+RevcPortalGrantPlayerLoadout(CPlayerPed *player)
+{
+	// Load only the three useful portal-test weapons. This mirrors the native
+	// weapon cheats' streaming discipline and avoids a missing weapon clump on
+	// the first frame after entering Vice City.
+	CStreaming::RequestModel(MI_COLT45, STREAMFLAGS_DONT_REMOVE);
+	CStreaming::RequestModel(MI_UZI, STREAMFLAGS_DONT_REMOVE);
+	CStreaming::RequestModel(MI_M4, STREAMFLAGS_DONT_REMOVE);
+	CStreaming::LoadAllRequestedModels(false);
+	player->GiveWeapon(WEAPONTYPE_COLT45, 500);
+	player->GiveWeapon(WEAPONTYPE_UZI, 750);
+	player->GiveWeapon(WEAPONTYPE_M4, 750);
+	player->SetCurrentWeapon(WEAPONTYPE_COLT45);
+	CStreaming::SetModelIsDeletable(MI_COLT45);
+	CStreaming::SetModelIsDeletable(MI_UZI);
+	CStreaming::SetModelIsDeletable(MI_M4);
+}
+
+static void
+RevcPortalProcessCommands(void)
+{
+	CPlayerPed *player = FindPlayerPed();
+	if(player == nil)
+		return;
+
+	if(gRevcPortalBridge.enterPending){
+		gRevcPortalBridge.enterPending = false;
+		RevcPortalPlacePlayer(player, gRevcPortalBridge.enterPosition, gRevcPortalBridge.enterHeading);
+		RevcPortalGrantPlayerLoadout(player);
+		if(gRevcPortalBridge.playerVisibilitySaved){
+			player->bIsVisible = gRevcPortalBridge.savedPlayerVisibility;
+			gRevcPortalBridge.playerVisibilitySaved = false;
+		}else
+			player->bIsVisible = true;
+		TheCamera.RestoreWithJumpCut();
+		// Keep the azimuth seen through the portal. Forcing the camera directly
+		// behind Tommy made the destination appear unrelated to the preview even
+		// though it was the same persistent world.
+		CCam &cam = TheCamera.Cams[TheCamera.ActiveCam];
+		CVector portalForward = gRevcPortalBridge.forward;
+		portalForward.Normalise();
+		TheCamera.m_bCamDirectlyBehind = false;
+		TheCamera.m_bCamDirectlyInFront = false;
+		TheCamera.m_bUseTransitionBeta = true;
+		cam.m_fTransitionBeta = CGeneral::GetATanOfXY(portalForward.x, portalForward.y) + PI;
+		while(cam.m_fTransitionBeta >= PI) cam.m_fTransitionBeta -= 2.0f * PI;
+		while(cam.m_fTransitionBeta < -PI) cam.m_fTransitionBeta += 2.0f * PI;
+		cam.ResetStatics = true;
+		cam.FOV = RevcPortalProjectionBaseFov();
+		TheCamera.Process();
+		// The hosted game starts through the frontend state machine. Its world can
+		// be fully initialised and rendering while CTimer still carries the
+		// frontend user/code pause, which produces a perfectly rendered but static
+		// Vice City after traversal. Entering the portal is the explicit handoff to
+		// gameplay, so release both pause sources here.
+		CTimer::EndUserPause();
+		CTimer::SetCodePause(false);
+		ReVC_SetPortalInputEnabled(true);
+		gRevcPortalBridge.entered = true;
+		gRevcPortalBridge.playerProtectionUntil = CTimer::GetTimeInMilliseconds() + 2000;
+		gRevcPortalBridge.returnRequested = false;
+		gRevcPortalBridge.havePreviousReturnDistance = false;
+		gRevcPortalBridge.returnCooldownUntil = CTimer::GetTimeInMilliseconds() + 1000;
+		RevcLogPortal("enter command applied; gameplay restored with 2000 ms player protection");
+		return;
+	}
+
+	if(gRevcPortalBridge.preparePending){
+		gRevcPortalBridge.preparePending = false;
+		CStreaming::LoadSceneCollision(gRevcPortalBridge.preparePosition);
+		CStreaming::LoadScene(gRevcPortalBridge.preparePosition);
+		RevcPortalPlacePlayer(player, gRevcPortalBridge.preparePosition, gRevcPortalBridge.prepareHeading);
+		// Preview is a live persistent Vice City, not a frozen loading snapshot.
+		// Keep input gated, but let timecycle, streaming, traffic and population
+		// advance before the player crosses the portal.
+		CTimer::EndUserPause();
+		CTimer::SetCodePause(false);
+		gRevcPortalBridge.prepared = true;
+		RevcLogPortal("destination prepared; preview simulation timer released");
+	}
+}
+
+extern "C" __declspec(dllexport) int
+ReVC_PortalGetGameplayView(float *values)
+{
+	if(values == nil || !gRevcPortalBridge.entered || Scene.camera == nil)
+		return 0;
+	RwMatrix *matrix = Scene.camera->getFrame()->getLTM();
+	if(matrix == nil)
+		return 0;
+	values[0] = matrix->pos.x; values[1] = matrix->pos.y; values[2] = matrix->pos.z;
+	values[3] = matrix->right.x; values[4] = matrix->right.y; values[5] = matrix->right.z;
+	values[6] = matrix->up.x; values[7] = matrix->up.y; values[8] = matrix->up.z;
+	values[9] = matrix->at.x; values[10] = matrix->at.y; values[11] = matrix->at.z;
+	values[12] = TheCamera.Cams[TheCamera.ActiveCam].FOV;
+	const RwV2d *viewWindow = RwCameraGetViewWindow(Scene.camera);
+	values[13] = viewWindow ? viewWindow->x : SCREEN_VIEWWINDOW;
+	values[14] = viewWindow ? viewWindow->y : SCREEN_VIEWWINDOW / SCREEN_ASPECT_RATIO;
+	return 1;
+}
+
+extern "C" __declspec(dllexport) int
+ReVC_PortalGetDestination(float *x, float *y, float *z, float *yaw)
+{
+	if(x == nil || y == nil || z == nil || yaw == nil)
+		return 0;
+	*x = gRevcPortalBridge.returnPosition.x;
+	*y = gRevcPortalBridge.returnPosition.y;
+	*z = gRevcPortalBridge.returnPosition.z;
+	*yaw = gRevcPortalBridge.returnYaw;
+	return gRevcPortalBridge.prepared || gRevcPortalBridge.entered ? 1 : 0;
+}
+
+extern "C" __declspec(dllexport) int
+ReVC_PortalConsumeReturnRequest(void)
+{
+	if(!gRevcPortalBridge.returnRequested)
+		return 0;
+	gRevcPortalBridge.returnRequested = false;
+	gRevcPortalBridge.entered = false;
+	gRevcPortalBridge.havePreviousReturnDistance = false;
+	return 1;
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_PortalSetReturnTexture(IDirect3DTexture9 *texture, int32 width, int32 height)
+{
+#if defined(RW_D3D9)
+	if(texture == nil || width <= 0 || height <= 0){
+		if(gRevcPortalBridge.returnRaster)
+			RwRasterDestroy(gRevcPortalBridge.returnRaster);
+		gRevcPortalBridge.returnRaster = nil;
+		gRevcPortalBridge.returnTexture = nil;
+		gRevcPortalBridge.returnTextureWidth = 0;
+		gRevcPortalBridge.returnTextureHeight = 0;
+		gRevcPortalBridge.returnTextureCopyLogged = false;
+		return;
+	}
+
+	const bool recreate = gRevcPortalBridge.returnRaster == nil ||
+		gRevcPortalBridge.returnTextureWidth != width ||
+		gRevcPortalBridge.returnTextureHeight != height;
+	if(recreate && gRevcPortalBridge.returnRaster){
+		RwRasterDestroy(gRevcPortalBridge.returnRaster);
+		gRevcPortalBridge.returnRaster = nil;
+		gRevcPortalBridge.returnTexture = nil;
+	}
+	if(gRevcPortalBridge.returnRaster == nil){
+		// Own the sampled raster in reVC/librw. A foreign SA RenderWare raster
+		// cannot safely be wrapped because both engines maintain independent
+		// native-raster and D3D state caches on the shared device.
+		RwRaster *raster = RwRasterCreate(width, height, 32,
+			rwRASTERTYPECAMERATEXTURE | rwRASTERFORMAT888);
+		if(raster == nil){
+			RevcLogPortal("San Andreas return raster creation failed");
+			return;
+		}
+		RevcD3dRasterExt *ext = reinterpret_cast<RevcD3dRasterExt*>(
+			reinterpret_cast<uint8*>(raster) + rw::d3d::nativeRasterOffset);
+		if(ext == nil || ext->texture == nil){
+			RwRasterDestroy(raster);
+			RevcLogPortal("San Andreas return raster has no native D3D texture");
+			return;
+		}
+		gRevcPortalBridge.returnRaster = raster;
+		gRevcPortalBridge.returnTexture = reinterpret_cast<IDirect3DTexture9*>(ext->texture);
+		gRevcPortalBridge.returnTextureWidth = width;
+		gRevcPortalBridge.returnTextureHeight = height;
+		gRevcPortalBridge.returnTextureCopyLogged = false;
+		gRevcPortalBridge.returnTextureCopyFailures = 0;
+	}
+
+	IDirect3DSurface9 *source = nil;
+	IDirect3DSurface9 *destination = nil;
+	HRESULT hr = texture->GetSurfaceLevel(0, &source);
+	if(SUCCEEDED(hr))
+		hr = gRevcPortalBridge.returnTexture->GetSurfaceLevel(0, &destination);
+	if(SUCCEEDED(hr))
+		hr = rw::d3d::d3ddevice->StretchRect(source, nil, destination, nil, D3DTEXF_NONE);
+	if(source) source->Release();
+	if(destination) destination->Release();
+	if(SUCCEEDED(hr)){
+		if(!gRevcPortalBridge.returnTextureCopyLogged){
+			D3DSURFACE_DESC sourceDesc, destinationDesc;
+			texture->GetLevelDesc(0, &sourceDesc);
+			gRevcPortalBridge.returnTexture->GetLevelDesc(0, &destinationDesc);
+			char buf[256];
+			sprintf(buf, "San Andreas return texture copied source=%p %ux%u fmt=%u destination=%p %ux%u fmt=%u",
+				texture, sourceDesc.Width, sourceDesc.Height, (uint32)sourceDesc.Format,
+				gRevcPortalBridge.returnTexture, destinationDesc.Width, destinationDesc.Height,
+				(uint32)destinationDesc.Format);
+			RevcLogPortal(buf);
+			gRevcPortalBridge.returnTextureCopyLogged = true;
+		}
+	}else if(gRevcPortalBridge.returnTextureCopyFailures++ < 5){
+		char buf[128];
+		sprintf(buf, "San Andreas return texture copy failed hr=0x%08X", (uint32)hr);
+		RevcLogPortal(buf);
+	}
+#else
+	(void)texture; (void)width; (void)height;
+#endif
+}
+
+static eWeaponType
+RevcPortalWeaponFromBridgeCode(int32 code)
+{
+	switch(code){
+	case 0: return WEAPONTYPE_COLT45;
+	case 1: return WEAPONTYPE_PYTHON;
+	case 2: return WEAPONTYPE_TEC9;
+	case 3: return WEAPONTYPE_UZI;
+	case 4: return WEAPONTYPE_MP5;
+	case 5: return WEAPONTYPE_M4;
+	case 6: return WEAPONTYPE_RUGER;
+	default: return WEAPONTYPE_UNARMED;
+	}
+}
+
+extern "C" __declspec(dllexport) int
+ReVC_PortalFireHitscan(float sx, float sy, float sz,
+	float ex, float ey, float ez, int32 weaponCode)
+{
+	if(!gRevcPortalBridge.enabled || !gRevcPortalBridge.prepared ||
+	   gRevcPortalBridge.entered)
+		return -1;
+
+	CPlayerPed *shooter = FindPlayerPed();
+	const eWeaponType weaponType = RevcPortalWeaponFromBridgeCode(weaponCode);
+	if(shooter == nil || weaponType == WEAPONTYPE_UNARMED)
+		return -1;
+
+	CVector source(sx, sy, sz);
+	CVector target(ex, ey, ez);
+	const CVector shot = target - source;
+	if(shot.MagnitudeSqr() < 0.0001f)
+		return -1;
+
+	CColPoint point{};
+	CEntity *victim = nil;
+	CEntity *oldIgnoreEntity = CWorld::pIgnoreEntity;
+	const bool oldIncludeDeadPeds = CWorld::bIncludeDeadPeds;
+	const bool oldIncludeCarTyres = CWorld::bIncludeCarTyres;
+	const bool oldIncludeBikers = CWorld::bIncludeBikers;
+	CWorld::pIgnoreEntity = shooter;
+	CWorld::bIncludeDeadPeds = true;
+	CWorld::bIncludeCarTyres = true;
+	CWorld::bIncludeBikers = true;
+	const bool hit = CWeapon::ProcessLineOfSight(source, target, point, victim,
+		weaponType, shooter, true, true, true, true, true, false, false);
+	CWorld::pIgnoreEntity = oldIgnoreEntity;
+	CWorld::bIncludeDeadPeds = oldIncludeDeadPeds;
+	CWorld::bIncludeCarTyres = oldIncludeCarTyres;
+	CWorld::bIncludeBikers = oldIncludeBikers;
+
+	if(victim)
+		CWeapon::CheckForShootingVehicleOccupant(&victim, &point, weaponType, source, target);
+
+	CVector2D ahead(shot.x, shot.y);
+	const float aheadLength = Sqrt(ahead.x * ahead.x + ahead.y * ahead.y);
+	if(aheadLength > 0.0001f){
+		ahead.x /= aheadLength;
+		ahead.y /= aheadLength;
+	}else{
+		ahead.x = 0.0f;
+		ahead.y = 1.0f;
+	}
+
+	CEventList::RegisterEvent(EVENT_GUNSHOT, EVENT_ENTITY_PED, shooter, shooter, 1000);
+	CWeapon::MakePedsJumpAtShot(shooter, &source, &target);
+	CWeapon weapon(weaponType, 1);
+	weapon.DoBulletImpact(shooter, victim, &source, &target, &point, ahead);
+
+	char buf[256];
+	snprintf(buf, sizeof(buf),
+		"SA hitscan code=%d weapon=%d hit=%d entityType=%d model=%d impact=(%.2f %.2f %.2f)",
+		weaponCode, (int)weaponType, hit ? 1 : 0,
+		victim ? (int)victim->GetType() : -1,
+		victim ? (int)victim->GetModelIndex() : -1,
+		hit ? point.point.x : target.x,
+		hit ? point.point.y : target.y,
+		hit ? point.point.z : target.z);
+	RevcLogPortal(buf);
+	return hit ? 1 : 0;
+}
+
+static void
+RevcPortalApplyViewWindow(void)
+{
+	if(!gRevcPortalBridge.enabled || !gRevcPortalBridge.viewValid || Scene.camera == nil)
+		return;
+	RwV2d viewWindow;
+	viewWindow.x = gRevcPortalBridge.viewWindowX;
+	viewWindow.y = gRevcPortalBridge.viewWindowY;
+	RwCameraSetViewWindow(Scene.camera, &viewWindow);
+}
+
+static float
+RevcPortalProjectionBaseFov(void)
+{
+	float halfTan = Max(gRevcPortalBridge.viewWindowX, 0.01f);
+#ifdef ASPECT_RATIO_SCALE
+	float aspect = CDraw::CalculateAspectRatio();
+	if(aspect > 0.01f)
+		halfTan *= DEFAULT_ASPECT_RATIO / aspect;
+#endif
+	return Clamp(RADTODEG(2.0f * Atan(halfTan)), 10.0f, 150.0f);
+}
+
+static void
+RevcPortalApplyCamera(void)
+{
+	CPlayerPed *player = FindPlayerPed();
+	if(!gRevcPortalBridge.enabled || !gRevcPortalBridge.viewValid || Scene.camera == nil){
+		if(player && gRevcPortalBridge.playerVisibilitySaved){
+			player->bIsVisible = gRevcPortalBridge.savedPlayerVisibility;
+			gRevcPortalBridge.playerVisibilitySaved = false;
+		}
+		return;
+	}
+
+	if(player && !gRevcPortalBridge.playerVisibilitySaved){
+		gRevcPortalBridge.savedPlayerVisibility = player->bIsVisible;
+		gRevcPortalBridge.playerVisibilitySaved = true;
+	}
+	if(player)
+		player->bIsVisible = false;
+
+	// The lightweight freeroam SCM starts with the loading splash fully faded
+	// out but, unlike the stock story script, never schedules a fade-in. Force
+	// preview rendering visible; once PortalEnter disables the override, normal
+	// VC scripts own the fade system again.
+	if(TheCamera.GetScreenFadeStatus() != FADE_0){
+		StillToFadeOut = false;
+		JustLoadedDontFadeInYet = false;
+		TheCamera.Fade(0.0f, FADE_IN);
+		TheCamera.ProcessFade();
+		TheCamera.ProcessMusicFade();
+	}
+
+	CVector up = gRevcPortalBridge.up;
+	CVector forward = gRevcPortalBridge.forward;
+	up.Normalise();
+	forward.Normalise();
+	// GTA's camera matrix stores the camera-left vector in GetRight().
+	// Rebuild that handed basis instead of copying the host's world-right vector.
+	CVector right = CrossProduct(up, forward);
+	right.Normalise();
+	up = CrossProduct(forward, right);
+	up.Normalise();
+
+	TheCamera.GetMatrix().GetRight() = right;
+	TheCamera.GetMatrix().GetUp() = up;
+	TheCamera.GetMatrix().GetForward() = forward;
+	TheCamera.GetMatrix().GetPosition() = gRevcPortalBridge.position;
+	TheCamera.GetGameCamPosition() = gRevcPortalBridge.position;
+	CDraw::SetFOV(RevcPortalProjectionBaseFov());
+	TheCamera.CalculateDerivedValues();
+	RevcPortalApplyViewWindow();
+
+	RwFrame *frame = RwCameraGetFrame(Scene.camera);
+	if(frame){
+		RwMatrix *matrix = RwFrameGetMatrix(frame);
+		*RwMatrixGetPos(matrix) = gRevcPortalBridge.position;
+		*RwMatrixGetRight(matrix) = right;
+		*RwMatrixGetUp(matrix) = up;
+		*RwMatrixGetAt(matrix) = forward;
+		RwMatrixUpdate(matrix);
+		RwFrameUpdateObjects(frame);
+		RwFrameOrthoNormalize(frame);
+	}
+	RwCameraSetNearClipPlane(Scene.camera, 0.05f);
+}
+#endif
 // SA overlay (tvcorn) disabled for now
 #if 0
 static RwTexDictionary *gSaOverlayTxd = nil;
@@ -98,7 +698,7 @@ static int gSaOverlayTexDumped = 0;
 #endif
 static void RevcLogCore(const char *msg)
 {
-	if(!gRevcLogEnabled)
+	if(!gRevcLogEnabled || gRevcFrameLogCount > 8)
 		return;
 	if(gRevcCoreLog == nil){
 		char exePath[MAX_PATH];
@@ -115,6 +715,305 @@ static void RevcLogCore(const char *msg)
 	fprintf(gRevcCoreLog, "Core: %s\n", msg);
 	fflush(gRevcCoreLog);
 }
+
+#ifdef REVC_DLL
+static void
+RevcLogPortal(const char *msg)
+{
+	if(gRevcCoreLog == nil){
+		char exePath[MAX_PATH];
+		GetModuleFileNameA(nil, exePath, MAX_PATH);
+		char *slash = strrchr(exePath, '\\');
+		if(slash) *(slash + 1) = '\0';
+		char logPath[MAX_PATH];
+		strcpy(logPath, exePath);
+		strcat(logPath, "revc_in_sa.log");
+		gRevcCoreLog = fopen(logPath, "a");
+	}
+	if(gRevcCoreLog == nil)
+		return;
+	fprintf(gRevcCoreLog, "Portal: %s\n", msg);
+	fflush(gRevcCoreLog);
+}
+
+static void
+RevcPortalTraceState(void)
+{
+	if(gRevcPortalBridge.traceFrames == 0)
+		return;
+
+	const uint32 frame = gRevcPortalBridge.traceFrames--;
+	if((frame % 15) != 0 && frame != 149)
+		return;
+
+	char buf[512];
+	CPlayerPed *player = FindPlayerPed();
+	CVector pos = player ? player->GetPosition() : CVector(0.0f, 0.0f, 0.0f);
+	CVector cam = TheCamera.GetPosition();
+	const RwV2d *viewWindow = Scene.camera ? RwCameraGetViewWindow(Scene.camera) : nil;
+	sprintf(buf,
+		"trace remaining=%u time=%u stepMs=%u timerPaused=%d input=%d controlsMask=0x%X "
+		"pending=%d player=%.2f %.2f %.2f camera=%.2f %.2f %.2f "
+		"fovRaw=%.3f fovScaled=%.3f viewWindow=(%.5f %.5f) screen=%dx%d keyW(temp/new)=%d/%d",
+		frame, CTimer::GetTimeInMilliseconds(), CTimer::GetTimeStepInMilliseconds(),
+		CTimer::GetIsPaused() ? 1 : 0, ReVC_IsPortalInputEnabled() ? 1 : 0,
+		(unsigned)CPad::GetPad(0)->DisablePlayerControls,
+		gRevcPortalBridge.enterPending ? 1 : 0,
+		pos.x, pos.y, pos.z, cam.x, cam.y, cam.z,
+		CDraw::GetFOV(), CDraw::GetScaledFOV(),
+		viewWindow ? viewWindow->x : 0.0f, viewWindow ? viewWindow->y : 0.0f,
+		(int)SCREEN_WIDTH, (int)SCREEN_HEIGHT,
+		(int)CPad::TempKeyState.VK_KEYS['W'], (int)CPad::NewKeyState.VK_KEYS['W']);
+	RevcLogPortal(buf);
+}
+
+static CVector
+RevcPortalNormal(void)
+{
+	return CVector(Cos(gRevcPortalBridge.returnYaw), Sin(gRevcPortalBridge.returnYaw), 0.0f);
+}
+
+static CVector
+RevcPortalRight(void)
+{
+	return CVector(-Sin(gRevcPortalBridge.returnYaw), Cos(gRevcPortalBridge.returnYaw), 0.0f);
+}
+
+static void
+RevcPortalUpdateReturnPortal(void)
+{
+	if(!gRevcPortalBridge.entered)
+		return;
+	CPlayerPed *player = FindPlayerPed();
+	if(player == nil)
+		return;
+
+	// The host owns the real Win32 window and forwards normal gameplay input to
+	// reVC. Read F4 directly as well: this avoids losing a short key transition
+	// between the host's BeginScene and CPad::UpdatePads.
+	const bool placeKeyDown = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+	const bool placeRequested = placeKeyDown && !gRevcPortalBridge.returnPlaceKeyDown;
+	gRevcPortalBridge.returnPlaceKeyDown = placeKeyDown;
+	if(placeRequested){
+		CCam &cam = TheCamera.Cams[TheCamera.ActiveCam];
+		CVector viewDirection = cam.Front;
+		viewDirection.Normalise();
+		CVector horizontalView(viewDirection.x, viewDirection.y, 0.0f);
+		if(horizontalView.MagnitudeSqr() < 0.0001f)
+			horizontalView = player->GetForward();
+		horizontalView.z = 0.0f;
+		horizontalView.Normalise();
+
+		CVector position;
+		CVector portalNormal = horizontalView * -1.0f;
+		CColPoint hitPoint;
+		CEntity *hitEntity = nil;
+		CEntity *oldIgnoreEntity = CWorld::pIgnoreEntity;
+		CWorld::pIgnoreEntity = player;
+		const bool aimedAtSurface = CWorld::ProcessLineOfSight(
+			cam.Source, cam.Source + viewDirection * 40.0f,
+			hitPoint, hitEntity, true, false, false, true, true, true, false);
+		CWorld::pIgnoreEntity = oldIgnoreEntity;
+		if(aimedAtSurface){
+			position = hitPoint.point;
+			CVector surfaceNormal(hitPoint.normal.x, hitPoint.normal.y, 0.0f);
+			if(surfaceNormal.MagnitudeSqr() > 0.16f){
+				surfaceNormal.Normalise();
+				portalNormal = surfaceNormal;
+			}
+			// Keep the vertical portal just outside the aimed geometry.
+			position += portalNormal * 0.10f;
+		}else{
+			position = player->GetPosition() + horizontalView * 4.0f;
+		}
+		bool groundFound = false;
+		float ground = CWorld::FindGroundZFor3DCoord(position.x, position.y, position.z + 10.0f, &groundFound);
+		if(groundFound)
+			position.z = ground;
+		gRevcPortalBridge.returnPosition = position;
+		gRevcPortalBridge.returnYaw = CGeneral::GetATanOfXY(portalNormal.x, portalNormal.y);
+		gRevcPortalBridge.preparePosition = position;
+		gRevcPortalBridge.prepareHeading = gRevcPortalBridge.returnYaw;
+		gRevcPortalBridge.prepared = true;
+		gRevcPortalBridge.havePreviousReturnDistance = false;
+		gRevcPortalBridge.returnCooldownUntil = CTimer::GetTimeInMilliseconds() + 750;
+		char buf[192];
+		sprintf(buf, "return portal placed at %.2f %.2f %.2f yaw=%.3f",
+			position.x, position.y, position.z, gRevcPortalBridge.returnYaw);
+		RevcLogPortal(buf);
+		static wchar placedMessage[64];
+		AsciiToUnicode("Portal to San Andreas placed", placedMessage);
+		CHud::SetHelpMessage(placedMessage, true);
+	}
+
+	CVector sample = player->GetPosition();
+	sample.z += 1.0f;
+	CVector center = gRevcPortalBridge.returnPosition + CVector(0.0f, 0.0f, 2.56f);
+	CVector relative = sample - center;
+	const float signedDistance = DotProduct(relative, RevcPortalNormal());
+	const float horizontal = DotProduct(relative, RevcPortalRight());
+	if(gRevcPortalBridge.havePreviousReturnDistance &&
+	   CTimer::GetTimeInMilliseconds() >= gRevcPortalBridge.returnCooldownUntil){
+		const float previousDistance = gRevcPortalBridge.previousReturnDistance;
+		const bool crossed = (previousDistance > 0.01f && signedDistance <= 0.0f) ||
+			(previousDistance < -0.01f && signedDistance >= 0.0f);
+		const float denominator = previousDistance - signedDistance;
+		if(crossed && Abs(denominator) > 0.0001f){
+			const float t = Clamp(previousDistance / denominator, 0.0f, 1.0f);
+			const CVector hit = gRevcPortalBridge.previousReturnSample +
+				(sample - gRevcPortalBridge.previousReturnSample) * t;
+			const CVector hitRelative = hit - center;
+			const float hitHorizontal = DotProduct(hitRelative, RevcPortalRight());
+			if(Abs(hitHorizontal) <= 2.15f && Abs(hitRelative.z) <= 2.60f){
+				gRevcPortalBridge.returnRequested = true;
+				gRevcPortalBridge.returnCooldownUntil = CTimer::GetTimeInMilliseconds() + 1500;
+				char buf[224];
+				sprintf(buf, "return portal crossed; requesting San Andreas handoff d=%.3f->%.3f hit=(%.2f %.2f %.2f) local=(%.2f %.2f)",
+					previousDistance, signedDistance, hit.x, hit.y, hit.z, hitHorizontal, hitRelative.z);
+				RevcLogPortal(buf);
+			}
+		}
+	}
+	if((++gRevcPortalBridge.returnDebugCounter % 180) == 0 &&
+	   (sample - center).MagnitudeSqr() < 100.0f){
+		char buf[224];
+		sprintf(buf, "return probe d=%.3f horizontal=%.3f vertical=%.3f portal=(%.2f %.2f %.2f yaw=%.3f) f4=%d",
+			signedDistance, horizontal, relative.z,
+			gRevcPortalBridge.returnPosition.x, gRevcPortalBridge.returnPosition.y,
+			gRevcPortalBridge.returnPosition.z, gRevcPortalBridge.returnYaw,
+			placeKeyDown ? 1 : 0);
+		RevcLogPortal(buf);
+	}
+	gRevcPortalBridge.previousReturnDistance = signedDistance;
+	gRevcPortalBridge.previousReturnSample = sample;
+	gRevcPortalBridge.havePreviousReturnDistance = true;
+}
+
+static void
+RevcPortalDrawQuad(const CVector *positions, RwRaster *raster,
+	uint8 red, uint8 green, uint8 blue, const float *projectedU = nil,
+	const float *projectedV = nil)
+{
+	RwIm3DVertex vertices[4];
+	for(int i = 0; i < 4; i++){
+		RwIm3DVertexSetPos(&vertices[i], positions[i].x, positions[i].y, positions[i].z);
+		RwIm3DVertexSetRGBA(&vertices[i], red, green, blue, 255);
+	}
+	static const float defaultU[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+	static const float defaultV[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+	const float *u = projectedU ? projectedU : defaultU;
+	const float *v = projectedV ? projectedV : defaultV;
+	for(int i = 0; i < 4; i++){
+		RwIm3DVertexSetU(&vertices[i], u[i]);
+		RwIm3DVertexSetV(&vertices[i], v[i]);
+	}
+	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, raster);
+	RwImVertexIndex indices[6] = {0, 1, 2, 0, 2, 3};
+	if(RwIm3DTransform(vertices, 4, nil, rwIM3D_VERTEXXYZ | rwIM3D_VERTEXRGBA | rwIM3D_VERTEXUV)){
+		// VC is hosted inside SA and the host restores raw D3D state between
+		// engines. librw's cache cannot observe that restore, so force the real
+		// native texture immediately before the draw.
+#if defined(RW_D3D9)
+		if(raster == gRevcPortalBridge.returnRaster &&
+		   gRevcPortalBridge.returnTexture && rw::d3d::d3ddevice)
+			rw::d3d::d3ddevice->SetTexture(0, gRevcPortalBridge.returnTexture);
+#endif
+		RwIm3DRenderIndexedPrimitive(rwPRIMTYPETRILIST, indices, 6);
+		RwIm3DEnd();
+	}
+}
+
+static bool
+RevcPortalDrawScreenSpaceQuad(const CVector *positions, RwRaster *raster)
+{
+	if(raster == nil || Scene.camera == nil || SCREEN_WIDTH <= 0.0f || SCREEN_HEIGHT <= 0.0f)
+		return false;
+
+	RwIm2DVertex vertices[4];
+	const float nearClip = CDraw::GetNearClipZ();
+	const float farClip = CDraw::GetFarClipZ();
+	const float nearScreenZ = RwIm2DGetNearScreenZ();
+	const float farScreenZ = RwIm2DGetFarScreenZ();
+	// The SA texture is a completed camera projection. It must therefore be
+	// sampled in screen space. A normal Im3D portal quad applies perspective
+	// correction once more and visibly bends/slides straight world geometry
+	// when the VC viewer looks at the portal obliquely.
+	const float screenSpaceRecipZ = 1.0f;
+	for(int i = 0; i < 4; i++){
+		CVector screen;
+		float spriteWidth, spriteHeight;
+		if(!CSprite::CalcScreenCoors(positions[i], &screen, &spriteWidth, &spriteHeight, false) ||
+		   screen.z <= nearClip || farClip <= nearClip)
+			return false;
+
+		const float depth = nearScreenZ +
+			(screen.z - nearClip) * (farScreenZ - nearScreenZ) * farClip /
+			((farClip - nearClip) * screen.z);
+		RwIm2DVertexSetScreenX(&vertices[i], screen.x);
+		RwIm2DVertexSetScreenY(&vertices[i], screen.y);
+		RwIm2DVertexSetScreenZ(&vertices[i], depth);
+		RwIm2DVertexSetRecipCameraZ(&vertices[i], screenSpaceRecipZ);
+		RwIm2DVertexSetIntRGBA(&vertices[i], 255, 255, 255, 255);
+		// Do not clamp per-vertex UVs. When a portal corner is outside the
+		// viewport, clipping happens after interpolation. Clamping only the UV
+		// while leaving the vertex off-screen destroys the screen-space identity
+		// mapping and makes the visible image look like a second shifted camera.
+		// The sampler itself remains CLAMP, so pixels outside the source raster are
+		// still handled safely.
+		RwIm2DVertexSetU(&vertices[i], screen.x / SCREEN_WIDTH, screenSpaceRecipZ);
+		RwIm2DVertexSetV(&vertices[i], screen.y / SCREEN_HEIGHT, screenSpaceRecipZ);
+	}
+
+	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, raster);
+#if defined(RW_D3D9)
+	// SA owns the source texture and updates it outside librw. Force the native
+	// binding because librw's state cache cannot observe the host-side copy.
+	if(raster == gRevcPortalBridge.returnRaster &&
+	   gRevcPortalBridge.returnTexture && rw::d3d::d3ddevice)
+		rw::d3d::d3ddevice->SetTexture(0, gRevcPortalBridge.returnTexture);
+#endif
+	RwImVertexIndex indices[6] = {0, 1, 2, 0, 2, 3};
+	RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, vertices, 4, indices, 6);
+	return true;
+}
+
+static void
+RevcPortalRenderReturnPortal(void)
+{
+	if(!gRevcPortalBridge.entered)
+		return;
+	const CVector normal = RevcPortalNormal();
+	const CVector right = RevcPortalRight();
+	const CVector up(0.0f, 0.0f, 1.0f);
+	const CVector center = gRevcPortalBridge.returnPosition + up * 2.56f + normal * 0.035f;
+	const float outerW = 2.18f, outerH = 2.68f;
+	const float innerW = 2.0f, innerH = 2.5f;
+	CVector outer[4] = {
+		center - right*outerW - up*outerH, center - right*outerW + up*outerH,
+		center + right*outerW + up*outerH, center + right*outerW - up*outerH
+	};
+	CVector inner[4] = {
+		center - right*innerW - up*innerH + normal*0.006f,
+		center - right*innerW + up*innerH + normal*0.006f,
+		center + right*innerW + up*innerH + normal*0.006f,
+		center + right*innerW - up*innerH + normal*0.006f
+	};
+	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)TRUE);
+	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)TRUE);
+	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
+	RwRenderStateSet(rwRENDERSTATEFOGENABLE, (void*)FALSE);
+	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)rwCULLMODECULLNONE);
+	RwRenderStateSet(rwRENDERSTATETEXTUREADDRESS, (void*)rwTEXTUREADDRESSCLAMP);
+	RwRenderStateSet(rwRENDERSTATETEXTUREFILTER, (void*)rwFILTERLINEAR);
+	// The orange quad is a backing frame. Do not let it write depth and mask
+	// the textured aperture when the player views the portal from its rear.
+	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)FALSE);
+	RevcPortalDrawQuad(outer, nil, 255, 154, 24);
+	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)TRUE);
+	RevcPortalDrawScreenSpaceQuad(inner, gRevcPortalBridge.returnRaster);
+	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, nil);
+}
+#endif
 
 static void
 LoadSaOverlayTexture(void)
@@ -373,6 +1272,9 @@ DoRWStuffStartOfFrame(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomR
 #else
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 #endif
+#ifdef REVC_DLL
+	RevcPortalApplyViewWindow();
+#endif
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
 	RwCameraClear(Scene.camera, &TopColor.rwRGBA, CLEARMODE);
 
@@ -404,6 +1306,9 @@ DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16
 	CameraSize(Scene.camera, prect, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 #else
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
+#endif
+#ifdef REVC_DLL
+	RevcPortalApplyViewWindow();
 #endif
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
 	RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
@@ -1769,9 +2674,19 @@ Idle(void *arg)
 	RevcLogCore("Idle: after CPointLights::InitPerFrame");
 
 	tbStartTimer(0, "CGame::Process");
+#ifdef REVC_DLL
+	RevcPortalUpdatePlayerProtection();
+#endif
 	CGame::Process();
 	tbEndTimer("CGame::Process");
 	RevcLogCore("Idle: after CGame::Process");
+#ifdef REVC_DLL
+	RevcPortalProcessCommands();
+	RevcPortalUpdatePlayerProtection();
+	RevcPortalApplyCamera();
+	RevcPortalTraceState();
+	RevcPortalUpdateReturnPortal();
+#endif
 	POP_MEMID();
 
 	tbStartTimer(0, "DMAudio.Service");
@@ -1905,6 +2820,14 @@ Idle(void *arg)
 		RevcLogCore("Idle: after RenderDebugShit");
 		RenderEffects();
 		RevcLogCore("Idle: after RenderEffects");
+#ifdef REVC_DLL
+		// Effects are part of the local VC camera. Drawing the SA aperture before
+		// them let coronas, particles, glass and other late VC passes bleed over
+		// the remote image, literally producing two camera views superimposed.
+		// Draw after all 3D effects; the portal's depth test still preserves Tommy
+		// and opaque foreground geometry that is physically in front of it.
+		RevcPortalRenderReturnPortal();
+#endif
 
 		if((TheCamera.m_BlurType == MOTION_BLUR_NONE || TheCamera.m_BlurType == MOTION_BLUR_LIGHT_SCENE) &&
 		   TheCamera.m_ScreenReductionPercentage > 0.0f)
@@ -1930,11 +2853,16 @@ Idle(void *arg)
 #endif
 		tbEndTimer("RenderMotionBlur");
 
-		tbStartTimer(0, "Render2dStuff");
-		RevcLogCore("Idle: before Render2dStuff");
-		Render2dStuff();
-		RevcLogCore("Idle: after Render2dStuff");
-		tbEndTimer("Render2dStuff");
+	#ifdef REVC_DLL
+		if(!gRevcPortalBridge.enabled)
+	#endif
+		{
+			tbStartTimer(0, "Render2dStuff");
+			RevcLogCore("Idle: before Render2dStuff");
+			Render2dStuff();
+			RevcLogCore("Idle: after Render2dStuff");
+			tbEndTimer("Render2dStuff");
+		}
 	}else{
 		RevcLogCore("Idle: menu branch start");
 		__try {
@@ -1988,25 +2916,38 @@ Idle(void *arg)
 		}
 	}
 
-	tbStartTimer(0, "RenderMenus");
-	RenderMenus();
-	tbEndTimer("RenderMenus");
-	RevcLogCore("Idle: after RenderMenus");
+	#ifdef REVC_DLL
+	if(!gRevcPortalBridge.enabled)
+	#endif
+	{
+		tbStartTimer(0, "RenderMenus");
+		RenderMenus();
+		tbEndTimer("RenderMenus");
+		RevcLogCore("Idle: after RenderMenus");
+	}
 
 #ifdef PS2_MENU
 	if ( TheMemoryCard.m_bWantToLoad )
 		goto popret;
 #endif
 
+	// DoFade also advances StillToFadeOut and starts the gameplay fade-in.
+	// Skipping it for portal preview leaves the camera permanently at
+	// FADE_2, so only the last loading splash ever reaches the portal target.
 	tbStartTimer(0, "DoFade");
 	DoFade();
 	tbEndTimer("DoFade");
 	RevcLogCore("Idle: after DoFade");
 
-	tbStartTimer(0, "Render2dStuff-Fade");
-	Render2dStuffAfterFade();
-	tbEndTimer("Render2dStuff-Fade");
-	RevcLogCore("Idle: after Render2dStuffAfterFade");
+	#ifdef REVC_DLL
+	if(!gRevcPortalBridge.enabled)
+	#endif
+	{
+		tbStartTimer(0, "Render2dStuff-Fade");
+		Render2dStuffAfterFade();
+		tbEndTimer("Render2dStuff-Fade");
+		RevcLogCore("Idle: after Render2dStuffAfterFade");
+	}
 #ifdef REVC_DLL
 	// SA overlay disabled for now
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
@@ -2025,9 +2966,6 @@ Idle(void *arg)
 
 	DoRWStuffEndOfFrame();
 	RevcLogCore("Idle: after DoRWStuffEndOfFrame");
-#ifdef REVC_DLL
-	Sleep(16);
-#endif
 
 	POP_MEMID();	// MEMID_RENDER
 	RevcLogCore("Idle: end");

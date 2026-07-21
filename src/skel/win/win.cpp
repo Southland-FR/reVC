@@ -71,7 +71,9 @@ static RwBool useDefault;
 static RwBool gRevcDllInitialized = FALSE;
 static RwBool gRevcExitRequested = FALSE;
 static RwBool gRevcGameInitialized = FALSE;
+static RwBool gRevcStartGameRequested = FALSE;
 static char gRevcPrevCwd[MAX_PATH];
+static char gRevcGameDir[MAX_PATH];
 
 static FILE *gRevcLog = nil;
 static bool gRevcLogEnabled = true;
@@ -82,6 +84,20 @@ static IDirect3D9 *gRevcD3D9 = nil;
 static HWND gRevcHwnd = nil;
 static RwBool gRevcInputInitialized = FALSE;
 static RwBool gRevcRwInitialized = FALSE;
+
+static void
+RevcUseGameDirectory(void)
+{
+	if(gRevcGameDir[0] != '\0')
+		SetCurrentDirectoryA(gRevcGameDir);
+}
+
+static void
+RevcUseHostDirectory(void)
+{
+	if(gRevcPrevCwd[0] != '\0')
+		SetCurrentDirectoryA(gRevcPrevCwd);
+}
 
 static void RevcLog(const char *fmt, ...)
 {
@@ -155,6 +171,11 @@ extern "C" {
 		const char* gameDataPath
 	);
 	__declspec(dllexport) void ReVC_Run();
+	__declspec(dllexport) RwBool ReVC_Step();
+	__declspec(dllexport) void ReVC_RequestStartGame();
+	__declspec(dllexport) int ReVC_IsReady();
+	__declspec(dllexport) void ReVC_SetRenderTarget(IDirect3DSurface9* color, IDirect3DSurface9* depth);
+	__declspec(dllexport) void ReVC_KeyEvent(UINT virtualKey, RwBool down);
 	__declspec(dllexport) void ReVC_Shutdown();
 }
 #endif
@@ -170,6 +191,7 @@ extern "C" {
 #include "ControllerConfig.h"
 #include "Frontend.h"
 #include "Game.h"
+#include "Script.h"
 #include "PCSave.h"
 #include "AnimViewer.h"
 #include "MemoryMgr.h"
@@ -716,6 +738,7 @@ ReVC_Init(HWND window, IDirect3DDevice9* device, IDirect3D9* d3d9, const char* g
 	gRevcDllInitialized = TRUE;
 	gRevcExitRequested = FALSE;
 	gRevcGameInitialized = FALSE;
+	gRevcStartGameRequested = FALSE;
 	gRevcD3DDevice = device;
 	gRevcD3D9 = d3d9;
 	gRevcHwnd = window;
@@ -724,9 +747,13 @@ ReVC_Init(HWND window, IDirect3DDevice9* device, IDirect3D9* d3d9, const char* g
 
 	gRevcPrevCwd[0] = '\0';
 	GetCurrentDirectoryA(MAX_PATH, gRevcPrevCwd);
+	gRevcGameDir[0] = '\0';
+	if(gameDataPath && gameDataPath[0] != '\0') {
+		strncpy(gRevcGameDir, gameDataPath, MAX_PATH - 1);
+		gRevcGameDir[MAX_PATH - 1] = '\0';
+	}
 	RevcLog("ReVC_Init: prev CWD=%s", gRevcPrevCwd);
-	if(gameDataPath && gameDataPath[0] != '\0')
-		SetCurrentDirectoryA(gameDataPath);
+	RevcUseGameDirectory();
 	RevcLog("ReVC_Init: new CWD=%s", gameDataPath ? gameDataPath : "(null)");
 	{
 		char dataPath[MAX_PATH];
@@ -855,13 +882,17 @@ ReVC_Init(HWND window, IDirect3DDevice9* device, IDirect3D9* d3d9, const char* g
 	}
 
 	RevcLog("ReVC_Init: ok");
+	RwInitialised = TRUE;
+	ForegroundApp = TRUE;
+	RsGlobal.quit = FALSE;
+	gGameState = GS_INIT_FRONTEND;
+	RevcUseHostDirectory();
 	return true;
 
 fail:
 	RevcLog("ReVC_Init: fail");
 	RsSetExternalD3D9Device(nil);
-	if(gRevcPrevCwd[0] != '\0')
-		SetCurrentDirectoryA(gRevcPrevCwd);
+	RevcUseHostDirectory();
 	gRevcDllInitialized = FALSE;
 	return false;
 }
@@ -892,12 +923,228 @@ RevcHandleKeyMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 extern "C" __declspec(dllexport) void
+ReVC_SetRenderTarget(IDirect3DSurface9 *color, IDirect3DSurface9 *depth)
+{
+	if(color != nil){
+		D3DSURFACE_DESC desc;
+		if(SUCCEEDED(color->GetDesc(&desc)) && desc.Width > 0 && desc.Height > 0){
+			gRevcBackBufferWidth = (int)desc.Width;
+			gRevcBackBufferHeight = (int)desc.Height;
+			RsGlobal.maximumWidth = (RwInt32)desc.Width;
+			RsGlobal.maximumHeight = (RwInt32)desc.Height;
+			RsGlobal.width = (RwInt32)desc.Width;
+			RsGlobal.height = (RwInt32)desc.Height;
+		}
+	}
+	rw::d3d::setExternalD3D9RenderTarget(color, depth, color != nil);
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_RequestStartGame(void)
+{
+	if(gRevcDllInitialized)
+		gRevcStartGameRequested = TRUE;
+}
+
+extern "C" __declspec(dllexport) int
+ReVC_IsReady(void)
+{
+	return gRevcDllInitialized && gRevcGameInitialized &&
+		gGameState == GS_PLAYING_GAME && !gRevcExitRequested;
+}
+
+static bool
+RevcIsExtendedVirtualKey(UINT key)
+{
+	switch(key){
+	case VK_PRIOR:
+	case VK_NEXT:
+	case VK_END:
+	case VK_HOME:
+	case VK_LEFT:
+	case VK_UP:
+	case VK_RIGHT:
+	case VK_DOWN:
+	case VK_INSERT:
+	case VK_DELETE:
+	case VK_DIVIDE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_KeyEvent(UINT virtualKey, RwBool down)
+{
+	if(!gRevcDllInitialized)
+		return;
+
+	UINT scanCode = MapVirtualKeyA(virtualKey, MAPVK_VK_TO_VSC);
+	LPARAM keyFlags = (LPARAM)(scanCode << 16);
+	if(RevcIsExtendedVirtualKey(virtualKey))
+		keyFlags |= (LPARAM)1 << 24;
+	if(!down)
+		keyFlags |= ((LPARAM)1 << 30) | ((LPARAM)1 << 31);
+	RevcHandleKeyMessage(down ? WM_KEYDOWN : WM_KEYUP, virtualKey, keyFlags);
+}
+
+static void
+RevcEnsureRenderSize(void)
+{
+	if(RsGlobal.maximumWidth != 0 && RsGlobal.maximumHeight != 0)
+		return;
+
+	RECT rect;
+	if(gRevcHwnd != nil && GetClientRect(gRevcHwnd, &rect) && rect.right > 0 && rect.bottom > 0) {
+		RsGlobal.maximumWidth = rect.right;
+		RsGlobal.maximumHeight = rect.bottom;
+		RsGlobal.width = rect.right;
+		RsGlobal.height = rect.bottom;
+		return;
+	}
+
+	if(gRevcD3DDevice != nil) {
+		IDirect3DSurface9 *backBuffer = nil;
+		if(SUCCEEDED(gRevcD3DDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer))) {
+			D3DSURFACE_DESC desc;
+			if(SUCCEEDED(backBuffer->GetDesc(&desc))) {
+				RsGlobal.maximumWidth = (RwInt32)desc.Width;
+				RsGlobal.maximumHeight = (RwInt32)desc.Height;
+				RsGlobal.width = (RwInt32)desc.Width;
+				RsGlobal.height = (RwInt32)desc.Height;
+			}
+			backBuffer->Release();
+		}
+	}
+}
+
+static RwBool
+ReVC_StepInternal(void)
+{
+	static RwUInt32 lastLoggedState = (RwUInt32)-1;
+	if(!gRevcDllInitialized || RsGlobal.quit || gRevcExitRequested)
+		return FALSE;
+
+	RwInitialised = TRUE;
+	ForegroundApp = TRUE;
+	if(lastLoggedState != gGameState) {
+		RevcLog("ReVC_Step: state=%u", (unsigned)gGameState);
+		lastLoggedState = gGameState;
+	}
+
+	switch(gGameState)
+	{
+	case GS_INIT_FRONTEND:
+		LoadingScreen(nil, nil, "loadsc0");
+		FrontEndMenuManager.m_bGameNotLoaded = true;
+		FrontEndMenuManager.m_bStartUpFrontEndRequested = true;
+		if(defaultFullscreenRes) {
+			defaultFullscreenRes = FALSE;
+			FrontEndMenuManager.m_nPrefsVideoMode = GcurSelVM;
+			FrontEndMenuManager.m_nDisplayVideoMode = GcurSelVM;
+		}
+		gGameState = GS_FRONTEND;
+		break;
+
+	case GS_FRONTEND:
+		__try {
+			RsEventHandler(rsFRONTENDIDLE, nil);
+		} __except(RevcSehFilter("ReVC_Step: exception in rsFRONTENDIDLE", GetExceptionInformation())) {
+			gRevcExitRequested = TRUE;
+		}
+		if(gRevcStartGameRequested){
+			gRevcStartGameRequested = FALSE;
+			FrontEndMenuManager.m_bMenuActive = false;
+			FrontEndMenuManager.m_bWantToLoad = false;
+		}
+		if(!FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bWantToLoad) {
+			FrontEndMenuManager.m_bWantToRestart = false;
+			gGameState = GS_INIT_PLAYING_GAME;
+		}
+		break;
+
+	case GS_INIT_PLAYING_GAME:
+		RevcEnsureRenderSize();
+		__try {
+			RevcLog("ReVC_Step: InitialiseGame begin");
+#ifdef USE_DEBUG_SCRIPT_LOADER
+			// The hosted portal needs a neutral free-roam world, not the story intro.
+			// Fall back to the stock script if the host did not deploy it.
+			if(GetFileAttributesA("data\\freeroam_miami.scm") != INVALID_FILE_ATTRIBUTES){
+				CTheScripts::ScriptToLoad = 1;
+				RevcLog("ReVC_Step: using data\\freeroam_miami.scm");
+			}else{
+				CTheScripts::ScriptToLoad = 0;
+				RevcLog("ReVC_Step: freeroam_miami.scm missing, using data\\main.scm");
+			}
+#endif
+			InitialiseGame();
+			gRevcGameInitialized = TRUE;
+		} __except(RevcSehFilter("ReVC_Step: exception in InitialiseGame", GetExceptionInformation())) {
+			gRevcExitRequested = TRUE;
+			break;
+		}
+		FrontEndMenuManager.m_bWantToRestart = false;
+		b_FoundRecentSavedGameWantToLoad = false;
+		FrontEndMenuManager.m_bGameNotLoaded = false;
+		gGameState = GS_PLAYING_GAME;
+		break;
+
+	case GS_PLAYING_GAME:
+		if(RwInitialised) {
+			__try {
+				RsEventHandler(rsIDLE, (void *)TRUE);
+			} __except(RevcSehFilter("ReVC_Step: exception in rsIDLE", GetExceptionInformation())) {
+				gRevcExitRequested = TRUE;
+			}
+		}
+		if(FrontEndMenuManager.m_bWantToLoad) {
+			CPad::ResetCheats();
+			CPad::StopPadsShaking();
+			DMAudio.ChangeMusicMode(MUSICMODE_DISABLE);
+			CGame::ShutDownForRestart();
+			CTimer::Stop();
+			CGame::InitialiseWhenRestarting();
+			DMAudio.ChangeMusicMode(MUSICMODE_GAME);
+			LoadSplash(GetLevelSplashScreen(CGame::currLevel));
+			FrontEndMenuManager.m_bWantToLoad = false;
+			FrontEndMenuManager.m_bWantToRestart = false;
+		}
+		break;
+
+	default:
+		gGameState = GS_INIT_FRONTEND;
+		break;
+	}
+
+	return (RsGlobal.quit || gRevcExitRequested) ? FALSE : TRUE;
+}
+
+extern "C" __declspec(dllexport) RwBool
+ReVC_Step(void)
+{
+	RwBool keepRunning = FALSE;
+	if(!gRevcDllInitialized)
+		return FALSE;
+
+	RevcUseGameDirectory();
+	__try {
+		keepRunning = ReVC_StepInternal();
+	} __finally {
+		RevcUseHostDirectory();
+	}
+	return keepRunning;
+}
+
+extern "C" __declspec(dllexport) void
 ReVC_Run()
 {
 	MSG message;
 	RwInitialised = TRUE;
 	gGameState = GS_INIT_FRONTEND;
 	RevcLog("ReVC_Run: begin");
+	RevcUseGameDirectory();
 	RevcLog("ReVC_Run: %s", gRevcBuildId);
 	RevcLog("ReVC_Run: state quit=%d exit=%d gameState=%d", RsGlobal.quit, gRevcExitRequested, gGameState);
 	RevcLog("ReVC_Run: hwnd=%p PSGLOBAL(window)=%p", gRevcHwnd, PSGLOBAL(window));
@@ -1077,11 +1324,15 @@ ReVC_Run()
 	}
 
 	RevcLog("ReVC_Run: end");
+	RevcUseHostDirectory();
 }
 
 extern "C" __declspec(dllexport) void
 ReVC_Shutdown()
 {
+	if(!gRevcDllInitialized)
+		return;
+	RevcUseGameDirectory();
 	RevcLog("ReVC_Shutdown: begin");
 	__try {
 		extern bool gRevcAudioOk;
@@ -1128,13 +1379,14 @@ ReVC_Shutdown()
 		RevcLog("ReVC_Shutdown: RsSetExternalD3D9Device SEH");
 	}
 
-	if(gRevcPrevCwd[0] != '\0')
-		SetCurrentDirectoryA(gRevcPrevCwd);
+	RevcUseHostDirectory();
 
 	RwInitialised = FALSE;
 	gRevcDllInitialized = FALSE;
 	gRevcExitRequested = FALSE;
 	gRevcGameInitialized = FALSE;
+	gRevcStartGameRequested = FALSE;
+	gRevcGameDir[0] = '\0';
 	RevcLog("ReVC_Shutdown: end");
 }
 #endif

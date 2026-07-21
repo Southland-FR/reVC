@@ -43,7 +43,18 @@ CClock::Initialise(uint32 scale)
 void
 CClock::Update(void)
 {
-	if(CPad::GetPad(1)->GetRightShoulder1())
+	// Pad 1 is not owned by the hosted VC runtime and may contain stale input
+	// while San Andreas drives the process.  The original debug shortcut would
+	// then add eight game minutes every frame.  Keep it in standalone reVC, but
+	// never let debug fast-time affect the portal world.
+#ifdef REVC_DLL
+	const bool debugFastTimeInput = false;
+	const bool debugFastTime = false;
+#else
+	const bool debugFastTimeInput = CPad::GetPad(1)->GetRightShoulder1();
+	const bool debugFastTime = gbFastTime;
+#endif
+	if(debugFastTimeInput)
 	{
 		ms_nGameClockMinutes += 8;
 		ms_nLastClockTick = CTimer::GetTimeInMilliseconds();
@@ -61,12 +72,12 @@ CClock::Update(void)
 	else if (gbFreezeTime)
 		ms_nLastClockTick = CTimer::GetTimeInMilliseconds();
 #endif
-	else if(CTimer::GetTimeInMilliseconds() - ms_nLastClockTick > ms_nMillisecondsPerGameMinute || gbFastTime)
+	else if(CTimer::GetTimeInMilliseconds() - ms_nLastClockTick > ms_nMillisecondsPerGameMinute || debugFastTime)
 	{
 		ms_nGameClockMinutes++;
 		ms_nLastClockTick += ms_nMillisecondsPerGameMinute;
 		
-		if ( gbFastTime )
+		if ( debugFastTime )
 			ms_nLastClockTick = CTimer::GetTimeInMilliseconds();
 		
 		if(ms_nGameClockMinutes >= 60)

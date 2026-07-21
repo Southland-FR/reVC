@@ -2,6 +2,11 @@
 
 #ifdef AUDIO_OAL
 
+#include <AL/alc.h>
+#include <AL/alext.h>
+extern ALCcontext *ALContext;
+extern ALCboolean SetEngineThreadContext(ALCcontext *context);
+
 #if defined _MSC_VER && !defined CMAKE_NO_AUTOLINK
 #ifdef AUDIO_OAL_USE_SNDFILE
 #pragma comment( lib, "libsndfile-1.lib" )
@@ -1156,6 +1161,10 @@ void audioFileOpsThread()
 		}
 
 		std::unique_lock<std::mutex> lock(stream->m_mutex);
+		// Keep the decoder worker on reVC's context even while the host switches
+		// the main thread between reVC and re3 every frame.
+		if(ALContext)
+			SetEngineThreadContext(ALContext);
 
 		std::pair<ALuint, ALuint> buffers, *lastBufAddr;
 		bool insertBufsAfterCheck = false;
@@ -1755,17 +1764,23 @@ void CStream::Update()
 
 		// Relying a lot on left buffer states in here
 
-		do
-		{
-			//alSourcef(m_pAlSources[0], AL_ROLLOFF_FACTOR, 0.0f);
-			alGetSourcei(m_pAlSources[0], AL_BUFFERS_QUEUED, &totalBuffers[0]);
-			alGetSourcei(m_pAlSources[0], AL_BUFFERS_PROCESSED, &buffersProcessed[0]);
-			//alSourcef(m_pAlSources[1], AL_ROLLOFF_FACTOR, 0.0f);
-			alGetSourcei(m_pAlSources[1], AL_BUFFERS_QUEUED, &totalBuffers[1]);
-			alGetSourcei(m_pAlSources[1], AL_BUFFERS_PROCESSED, &buffersProcessed[1]);
-		} while (buffersProcessed[0] != buffersProcessed[1]);
+		//alSourcef(m_pAlSources[0], AL_ROLLOFF_FACTOR, 0.0f);
+		alGetSourcei(m_pAlSources[0], AL_BUFFERS_QUEUED, &totalBuffers[0]);
+		alGetSourcei(m_pAlSources[0], AL_BUFFERS_PROCESSED, &buffersProcessed[0]);
+		//alSourcef(m_pAlSources[1], AL_ROLLOFF_FACTOR, 0.0f);
+		alGetSourcei(m_pAlSources[1], AL_BUFFERS_QUEUED, &totalBuffers[1]);
+		alGetSourcei(m_pAlSources[1], AL_BUFFERS_PROCESSED, &buffersProcessed[1]);
 
-		assert(buffersProcessed[0] == buffersProcessed[1]);
+		// The two mono sources used for a stereo stream can finish a buffer on
+		// adjacent mixer ticks. Busy-waiting for exact equality can therefore
+		// trap the entire host game inside one embedded reVC frame. Only consume
+		// pairs that both channels have completed; the leading channel catches up
+		// naturally on a later frame.
+		if (buffersProcessed[0] != buffersProcessed[1]) {
+			ALint commonProcessed = Min(buffersProcessed[0], buffersProcessed[1]);
+			buffersProcessed[0] = commonProcessed;
+			buffersProcessed[1] = commonProcessed;
+		}
 
 		// Correcting OpenAL concepts here:
 		// AL_BUFFERS_QUEUED = Number of *all* buffers in queue, including processed, processing and pending

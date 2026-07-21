@@ -79,6 +79,46 @@ char CPad::KeyBoardCheatString[30];
 CMouseControllerState CPad::OldMouseControllerState;
 CMouseControllerState CPad::NewMouseControllerState;
 CMouseControllerState CPad::PCTempMouseControllerState;
+
+#if defined(REVC_DLL)
+static bool gRevcMouseInputEnabled = true;
+static bool gRevcPortalInputEnabled = true;
+
+void
+ReVC_SetPortalInputEnabled(bool enabled)
+{
+	gRevcPortalInputEnabled = enabled;
+	for(int i = 0; i < MAX_PADS; i++)
+		Pads[i].Clear(false);
+	CPad::OldKeyState.Clear();
+	CPad::NewKeyState.Clear();
+	CPad::TempKeyState.Clear();
+	CPad::OldMouseControllerState.Clear();
+	CPad::NewMouseControllerState.Clear();
+	CPad::PCTempMouseControllerState.Clear();
+}
+
+bool
+ReVC_IsPortalInputEnabled(void)
+{
+	return gRevcPortalInputEnabled;
+}
+
+extern "C" __declspec(dllexport) void
+ReVC_SetMouseInputEnabled(RwBool enabled)
+{
+	const bool shouldEnable = enabled != FALSE;
+	gRevcMouseInputEnabled = shouldEnable;
+	Pads[0].PCTempMouseState.Clear();
+	Pads[0].ClearMouseHistory();
+	if(PSGLOBAL(mouse) != nil){
+		if(shouldEnable)
+			PSGLOBAL(mouse)->Acquire();
+		else
+			PSGLOBAL(mouse)->Unacquire();
+	}
+}
+#endif
 #endif
 
 #ifdef DETECT_PAD_INPUT_SWITCH
@@ -888,6 +928,13 @@ CMouseControllerState CMousePointerStateHelper::GetMouseSetUp()
 
 void CPad::UpdateMouse()
 {
+#if defined(REVC_DLL)
+	if(!gRevcMouseInputEnabled){
+		PCTempMouseState.Clear();
+		ClearMouseHistory();
+		return;
+	}
+#endif
 #if defined RW_D3D9 || defined RWLIBS
 	if ( IsForegroundApp() )
 	{
@@ -1673,6 +1720,16 @@ void CPad::UpdatePads(void)
 	Pads[1].OldState.Clear();
 #endif
 #else
+	#if defined(REVC_DLL)
+	if(!gRevcPortalInputEnabled){
+		for(int i = 0; i < MAX_PADS; i++)
+			Pads[i].Clear(false);
+		OldKeyState.Clear();
+		NewKeyState.Clear();
+		TempKeyState.Clear();
+		return;
+	}
+	#endif
 	bool bUpdate = true;
 
 	GetPad(0)->UpdateMouse();
