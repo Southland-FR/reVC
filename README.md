@@ -12,6 +12,9 @@ Rendering is handled either by original RenderWare (D3D8)
 or the reimplementation [librw](https://github.com/aap/librw) (D3D9, OpenGL 2.1 or above, OpenGL ES 2.0 or above).\
 Audio is done with MSS (using dlls from original GTA) or OpenAL.
 
+> [!NOTE]
+> The `vcinsa` branch uses the [`vc3insa` integration branch of Southland-FR/librw](https://github.com/Southland-FR/librw/tree/vc3insa), pinned by the `vendor/librw` gitlink at `d4501613b3590cd2301897105c15086ebd00051c`. After cloning or switching branches, run `git submodule update --init --recursive` rather than substituting a moving librw branch.
+
 We cannot build for PS2 or Xbox yet. If you're interested in doing so, get in touch with us.
 
 ## Installation
@@ -142,7 +145,7 @@ Microsoft recently discontinued its downloads of the DX9 SDK. You can download a
 
 > :information_source: There are various settings in [config.h](https://github.com/mrxenginner/reVC/tree/miami/src/core/config.h), you may want to take a look there.
 
-> :information_source: reVC uses completely homebrew RenderWare-replacement rendering engine; [librw](https://github.com/aap/librw/). librw comes as submodule of re3, but you also can use LIBRW enviorenment variable to specify path to your own librw.
+> :information_source: reVC uses the homebrew RenderWare replacement [librw](https://github.com/aap/librw/). This repository carries it as `vendor/librw`; on `vcinsa`, that submodule is pinned to Southland-FR/librw's `vc3insa` integration. Other branches may use their own recorded gitlink. Premake builds can also use the `LIBRW` environment variable to select an explicit checkout.
 
 If you feel the need, you can also use CodeWarrior 7 to compile reVC using the supplied codewarrior/reVC.mcp project - this requires the original RW34 libraries, and the DX8 SDK. The build is unstable compared to the MSVC builds though, and is mostly meant to serve as a reference.
 
