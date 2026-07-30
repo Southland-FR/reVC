@@ -12,5 +12,5 @@
 	branch = master
 [submodule "vendor/librw"]
 	path = vendor/librw
-	url = https://github.com/mrxenginner/librw.git
-	branch = master
+	url = https://github.com/Southland-FR/librw.git
+	branch = vc3insa
